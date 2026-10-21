@@ -42,6 +42,9 @@ try {
   await page.screenshot({ path: `${shots}/04c-specialties.png` });
   await page.click("nav.tabs >> text=Today");
   await page.click("text=Study everything");
+  await page.waitForSelector("text=cards ready");
+  await page.screenshot({ path: `${shots}/05a-plan.png` });
+  await page.click("text=25 cards");
   await page.waitForSelector(".card-host");
   await page.screenshot({ path: `${shots}/05-study-front.png` });
   await page.click("text=Show answer");
@@ -56,6 +59,13 @@ try {
   await page.waitForTimeout(300);
   const after = await page.locator(".study-top span.small").innerText();
   console.log("progress", before, "→", after);
+  await page.click('[aria-label="Card info"]'); await page.waitForSelector("text=stability");
+  await page.screenshot({ path: `${shots}/06b-info.png` });
+  await page.click("text=Edit this card"); await page.waitForSelector("textarea");
+  await page.fill("textarea >> nth=0", "Edited front {{c1::answer}}");
+  await page.click("text=Save"); await page.waitForTimeout(300);
+  await page.click('[aria-label="Close info"]'); await page.waitForTimeout(200);
+  console.log("edited:", await page.locator(".card-host").evaluate((el) => el.shadowRoot!.querySelector(".card")!.textContent!.trim().slice(0, 40)));
   await page.click('[aria-label="Undo"]'); await page.waitForTimeout(300);
   const afterUndo = await page.locator(".study-top span.small").innerText();
   console.log("after undo", afterUndo);

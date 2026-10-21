@@ -105,3 +105,12 @@ h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 .seg { display: flex; background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 3px; margin-bottom: 12px; }
 .seg button { flex: 1; padding: 8px 4px; border-radius: 9px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .seg button.on { background: var(--bg-3); color: var(--text); }
+
+.sheet-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 40; display: flex; align-items: flex-end; justify-content: center; }
+.sheet { background: var(--bg-2); border: 1px solid var(--line); border-radius: 20px 20px 0 0; padding: 14px 16px calc(16px + var(--safe-b)); width: 100%; max-width: 760px; max-height: 85dvh; overflow: auto; }
+.sheet textarea { background: var(--bg-3); border: 1px solid var(--line); color: var(--text); border-radius: 10px; padding: 10px 12px; font: inherit; font-size: 14px; width: 100%; resize: vertical; }
+.swipe-hint { position: absolute; top: 40%; font-size: 28px; font-weight: 800; padding: 8px 16px; border-radius: 14px; background: var(--bg-2); border: 1px solid var(--line); }
+.swipe-hint.again { right: 20px; color: var(--again); }
+.swipe-hint.good { left: 20px; color: var(--good); }
+.study-body { position: relative; }
+.btn.primary .muted { color: rgba(19,10,3,.65); }

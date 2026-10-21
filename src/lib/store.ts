@@ -268,6 +268,15 @@ export class Store {
     const fresh = cards.filter((c) => c.state === "new").sort((a, b) => a.due - b.due || a.created - b.created).slice(0, budget);
     // Interleave new cards among reviews so a session isn't all-new at the end.
     const out: Card[] = [...learning];
+    if (this.settings.burySiblings) {
+      const seenNotes = new Set<string>();
+      const start = this.dayStart(now);
+      for (let i = this.reviews.length - 1; i >= 0 && this.reviews[i].ts >= start; i--) { const c = this.cards.get(this.reviews[i].cid); if (c) seenNotes.add(c.nid); }
+      const keep = (c: Card) => { if (seenNotes.has(c.nid)) return false; seenNotes.add(c.nid); return true; };
+      for (const c of learning) seenNotes.add(c.nid);
+      review.splice(0, review.length, ...review.filter(keep));
+      fresh.splice(0, fresh.length, ...fresh.filter(keep));
+    }
     const step = fresh.length ? Math.max(1, Math.floor((review.length + fresh.length) / fresh.length)) : Infinity;
     let fi = 0;
     for (let i = 0; i < review.length; i++) {
@@ -305,6 +314,13 @@ export class Store {
     await Promise.all([db.putOne("cards", prev), db.deleteMany("reviews", [last.id])]);
     this.bump();
     return true;
+  }
+
+  async updateNote(noteId: string, fields: string[], userTags: string[]) {
+    const n = this.notes.get(noteId); if (!n) return;
+    const auto = n.tags.filter((t) => t.startsWith("auto::"));
+    const next = { ...n, fields, tags: [...new Set([...userTags, ...auto])], modified: Date.now() };
+    this.notes.set(noteId, next); await db.putOne("notes", next); this.bump(); this.touch();
   }
 
   async setSuspended(cardId: string, suspended: boolean) {
