@@ -1,0 +1,68 @@
+import { chromium } from "playwright";
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+const port = 4173;
+const server = spawn("python3", ["-m", "http.server", String(port), "--bind", "127.0.0.1", "-d", "docs"], { stdio: "ignore" });
+await new Promise((r) => setTimeout(r, 800));
+const shots = "test/e2e/shots"; fs.mkdirSync(shots, { recursive: true });
+const browser = await chromium.launch();
+const ctx = await browser.newContext({ viewport: { width: 412, height: 915 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+const page = await ctx.newPage();
+const errors: string[] = [];
+page.on("pageerror", (e) => errors.push("pageerror: " + e.message));
+page.on("console", (m) => { if (m.type() === "error") errors.push("console: " + m.text()); });
+const fixture = process.argv[2] ?? "test/fixtures/medicine-legacy.apkg";
+try {
+  await page.goto(`http://127.0.0.1:${port}/`);
+  await page.waitForSelector("text=Nothing to study yet", { timeout: 15000 });
+  console.log("zstd native:", await page.evaluate(() => { try { new DecompressionStream("zstd" as any); return true; } catch { return false; } }));
+  await page.screenshot({ path: `${shots}/01-empty.png` });
+  await page.click("nav.tabs >> text=Settings");
+  await page.setInputFiles('input[type=file]', fixture);
+  await page.waitForFunction(() => document.body.innerText.includes("Imported "), null, { timeout: 180000 });
+  const summary = await page.locator("text=/Imported .*/").first().innerText();
+  console.log(summary);
+  await page.screenshot({ path: `${shots}/02-imported.png` });
+  // Reload: data must persist in IndexedDB.
+  await page.reload();
+  await page.waitForSelector("text=cards ready now", { timeout: 20000 });
+  const ready = await page.locator(".big").first().innerText();
+  console.log("ready now:", ready);
+  await page.screenshot({ path: `${shots}/03-today.png` });
+  await page.click("nav.tabs >> text=Library");
+  await page.waitForSelector("text=Categories");
+  await page.screenshot({ path: `${shots}/04-library.png` });
+  await page.click("nav.tabs >> text=Today");
+  await page.click("text=Study everything");
+  await page.waitForSelector(".card-host");
+  await page.screenshot({ path: `${shots}/05-study-front.png` });
+  await page.click("text=Show answer");
+  await page.waitForSelector(".answer-bar");
+  await page.screenshot({ path: `${shots}/06-study-back.png` });
+  const before = await page.locator(".study-top span.small").innerText();
+  await page.click(".answer-bar .good");
+  await page.waitForTimeout(300);
+  await page.click("text=Show answer"); await page.click(".answer-bar .again");
+  await page.waitForTimeout(300);
+  await page.click("text=Show answer"); await page.click(".answer-bar .easy");
+  await page.waitForTimeout(300);
+  const after = await page.locator(".study-top span.small").innerText();
+  console.log("progress", before, "→", after);
+  await page.click('[aria-label="Undo"]'); await page.waitForTimeout(300);
+  const afterUndo = await page.locator(".study-top span.small").innerText();
+  console.log("after undo", afterUndo);
+  await page.click('[aria-label="Close"]');
+  await page.click("nav.tabs >> text=Progress");
+  await page.waitForSelector("text=day streak");
+  await page.screenshot({ path: `${shots}/07-progress.png` });
+  // Persisted after reload?
+  await page.reload(); await page.waitForSelector("text=cards ready now");
+  const stats = await page.locator(".stat-grid").innerText();
+  console.log("stats after reload:", stats.replace(/\n/g, " | "));
+  // Desktop view
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.screenshot({ path: `${shots}/08-desktop.png` });
+  console.log("errors:", errors.length ? errors : "none");
+} finally {
+  await browser.close(); server.kill();
+}

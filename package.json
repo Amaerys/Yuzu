@@ -1,0 +1,16 @@
+{
+  "name": "yuzu",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --import tsx --test test/*.test.ts",
+    "e2e": "node --import tsx test/e2e/run.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "private": true
+}
