@@ -1,0 +1,77 @@
+// Inbox: packs (and curation files) that arrived in the sync repository's inbox/ folder.
+// Nothing is added until the user reviews the cards and taps Add. A whole pack can be removed later.
+import { useState } from "react";
+import { store } from "../lib/store";
+import { IconClose } from "./icons";
+
+const clean = (s: string) => (s ?? "").replace(/\{\{c\d+::(.*?)(?:::[^}]*)?\}\}/g, "[$1]").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+
+function Review({ sha, onDone }: { sha: string; onDone: () => void }) {
+  const e = store.inbox.find((x) => x.sha === sha);
+  const [dropped, setDropped] = useState<Set<number>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  if (!e) return null;
+  const p = e.pack;
+  if (p.yuzu_curation === 1) {
+    return (
+      <div className="card-box">
+        <b>{p.name ?? e.file}</b>
+        <p className="small muted">A curation file: {p.merges?.length ?? 0} merges, {Object.keys(p.decks ?? {}).length} category rules, {Object.values(p.tags ?? {}).reduce((a: number, v: any) => a + v.length, 0).toLocaleString()} tag additions.</p>
+        <div className="row"><button className="btn primary grow" disabled={busy} onClick={async () => { setBusy(true); setMsg(await store.acceptInbox(sha, "all")); setBusy(false); onDone(); }}>Apply</button><button className="btn" disabled={busy} onClick={async () => { await store.dismissInbox(sha); onDone(); }}>Discard</button></div>
+        {msg && <p className="small">{msg}</p>}
+      </div>
+    );
+  }
+  const cards: any[] = p.cards ?? [];
+  const keep = cards.length - dropped.size;
+  return (
+    <>
+      <div className="card-box">
+        <b>{p.name ?? e.file}</b>
+        <div className="small muted">{cards.length} cards → {p.category ?? "Medicine::Inbox"}{p.tags?.length ? ` · ${p.tags.filter((t: string) => !t.startsWith("auto::")).join(", ")}` : ""}</div>
+        <p className="small muted" style={{ marginBottom: 0 }}>Tap a card to drop it. Nothing is added until you tap Add.</p>
+      </div>
+      {cards.map((c, i) => (
+        <button key={i} className="list-row" style={{ width: "100%", textAlign: "left", opacity: dropped.has(i) ? 0.4 : 1, flexDirection: "column", alignItems: "stretch", gap: 2 }} onClick={() => { const d = new Set(dropped); d.has(i) ? d.delete(i) : d.add(i); setDropped(d); }}>
+          <span style={{ whiteSpace: "normal" }}>{dropped.has(i) ? "✗ " : ""}{clean(c.text ?? c.front)}</span>
+          {(c.back || c.extra) && <span className="small muted" style={{ whiteSpace: "normal" }}>{clean(c.back ?? c.extra).slice(0, 160)}</span>}
+        </button>
+      ))}
+      <div className="row" style={{ marginTop: 12, position: "sticky", bottom: "calc(76px + var(--safe-b))", background: "var(--bg)", padding: "8px 0" }}>
+        <button className="btn primary grow" disabled={busy || keep === 0} onClick={async () => { setBusy(true); setMsg(await store.acceptInbox(sha, cards.map((_, i) => i).filter((i) => !dropped.has(i)))); setBusy(false); onDone(); }}>Add {keep} card{keep === 1 ? "" : "s"}</button>
+        <button className="btn" disabled={busy} onClick={async () => { await store.dismissInbox(sha); onDone(); }}>Discard pack</button>
+      </div>
+      {msg && <p className="small">{msg}</p>}
+    </>
+  );
+}
+
+export function Inbox({ onClose }: { onClose: () => void }) {
+  const [open, setOpen] = useState<string | null>(null);
+  const [msg, setMsg] = useState("");
+  store.getVersion();
+  if (open) return <div className="screen"><div className="row"><h1 className="grow" style={{ margin: 0 }}>Review pack</h1><button className="icon-btn" aria-label="Back" onClick={() => setOpen(null)}><IconClose /></button></div><Review sha={open} onDone={() => setOpen(null)} /></div>;
+  return (
+    <div className="screen">
+      <div className="row"><h1 className="grow" style={{ margin: 0 }}>Inbox</h1><button className="icon-btn" aria-label="Close inbox" onClick={onClose}><IconClose /></button></div>
+      <p className="small muted">Packs that Claude (or you) put in the <b>inbox</b> folder of your sync repository. Review each one before it joins your collection.</p>
+      {store.inbox.length === 0 && <div className="empty">Nothing waiting. Ask Claude for a pack, or sync to check again.</div>}
+      {store.inbox.map((e) => (
+        <button key={e.sha} className="tree-row" style={{ width: "100%", textAlign: "left" }} onClick={() => setOpen(e.sha)}>
+          <span className="name">{e.pack.name ?? e.file}</span>
+          <span className="small muted">{e.pack.yuzu_curation ? "curation" : `${e.pack.cards?.length ?? 0} cards`}</span>
+        </button>
+      ))}
+      {store.packLog.length > 0 && (
+        <>
+          <h2>Added packs</h2>
+          {store.packLog.map((p) => (
+            <div key={p.id + p.at} className="list-row"><span className="t">{p.name} · {p.noteIds.length} cards · {new Date(p.at).toLocaleDateString()}</span><button className="chip" onClick={async () => { if (confirm(`Remove all ${p.noteIds.length} cards of “${p.name}”? Their review history goes with them.`)) setMsg(`Removed ${await store.removePack(p.id)} cards.`); }}>Remove</button></div>
+          ))}
+        </>
+      )}
+      {msg && <p className="small">{msg}</p>}
+    </div>
+  );
+}

@@ -18,8 +18,13 @@ export function fakeGitHub(opts: { flaky?: number } = {}) {
       if (!head) return json({ message: "This repository is empty." }, 404);
       const path = decodeURIComponent(p.slice(10));
       const tree = trees.get(commits.get(head)!.tree)!;
+      if (path === "inbox") { const files = Object.keys(tree).filter((k) => k.startsWith("inbox/")); return files.length ? json(files.map((k) => ({ type: "file", name: k.slice(6), sha: tree[k], size: blobs.get(tree[k])!.length }))) : new Response("", { status: 404 }); }
       const b = tree[path]; if (!b) return new Response("", { status: 404 });
       return new Response(blobs.get(b)!, { status: 200 });
+    }
+    if (p.startsWith("/contents/inbox/") && m === "DELETE") {
+      const path = decodeURIComponent(p.slice(10)); const tree = { ...trees.get(commits.get(head!)!.tree)! }; if (!tree[path]) return json({ message: "Not Found" }, 404);
+      delete tree[path]; const t = sha(); trees.set(t, tree); const c = sha(); commits.set(c, { tree: t, parents: [head!] }); head = c; return json({ commit: { sha: c } });
     }
     if (p === "/contents/.yuzu" && m === "PUT") { const b = sha(); blobs.set(b, dec(body.content)); const t = sha(); trees.set(t, { ".yuzu": b }); const c = sha(); commits.set(c, { tree: t, parents: [] }); head = c; return json({ commit: { sha: c } }); }
     if (!head && p.startsWith("/git/")) return json({ message: "Git Repository is empty." }, 409);
@@ -40,5 +45,6 @@ export function fakeGitHub(opts: { flaky?: number } = {}) {
     if (p === "/git/refs" && m === "POST") { head = body.sha; return json({}); }
     return new Response("nope " + m + " " + p, { status: 500 });
   };
-  return { fetchImpl, files: () => (head ? trees.get(commits.get(head)!.tree)! : {}), commits: () => commits.size, calls: () => calls, setFlaky: (k: number) => { flaky = k; } };
+  const drop = (name: string, content: string) => { const b = sha(); blobs.set(b, content); const tree = { ...(head ? trees.get(commits.get(head)!.tree)! : {}) }; tree["inbox/" + name] = b; const t = sha(); trees.set(t, tree); const c = sha(); commits.set(c, { tree: t, parents: head ? [head] : [] }); head = c; };
+  return { fetchImpl, files: () => (head ? trees.get(commits.get(head)!.tree)! : {}), commits: () => commits.size, calls: () => calls, setFlaky: (k: number) => { flaky = k; }, drop };
 }

@@ -25,7 +25,7 @@ export function YuzuGoal({ value, max, size = 104 }: { value: number; max: numbe
   );
 }
 
-export function Today({ onStudy }: { onStudy: (path: string, view?: View) => void }) {
+export function Today({ onStudy, onInbox }: { onStudy: (path: string, view?: View) => void; onInbox?: () => void }) {
   const pins = store.settings.pins.map((p) => {
     const cards = store.cardsIn(p.path, p.view); const now = Date.now();
     const name = p.view === "smart" ? (store.settings.smart.find((s) => s.id === p.path)?.name ?? "Smart deck") : (p.path.split("::").pop() || "All");
@@ -50,6 +50,7 @@ export function Today({ onStudy }: { onStudy: (path: string, view?: View) => voi
         {store.syncConfigured() && <span className={"chip" + (store.syncStatus.state === "error" ? "" : " yuzu")} title={store.syncStatus.message} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "syncing…" : store.syncStatus.state === "error" ? "sync failed" : store.hasUnsynced() ? "unsynced" : "synced"}</span>}
         <span className="chip orange"><IconFlame /> {stats.streak} day{stats.streak === 1 ? "" : "s"}</span>
       </div>
+      {store.inbox.length > 0 && onInbox && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginBottom: 10, borderColor: "var(--yuzu)" }} onClick={onInbox}><span className="grow"><b>{store.inbox.length} new pack{store.inbox.length === 1 ? "" : "s"} from Claude</b><div className="small muted">Review the cards before they join your collection</div></span><span className="chip yuzu">Review</span></button>}
       {store.cards.size === 0 ? (
         <div className="card-box"><div style={{ fontWeight: 700, marginBottom: 6 }}>Nothing to study yet</div><div className="muted small">Go to Settings and import your Anki collection. Review history comes with it, so nothing starts over.</div></div>
       ) : (

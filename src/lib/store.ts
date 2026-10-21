@@ -126,6 +126,7 @@ export class Store {
           if (got.media) { const blobs: { name: string; blob: Blob }[] = []; for (const [name, url] of Object.entries(got.media as Record<string, string>)) { if (this.media.has(name)) continue; const blob = await (await fetch(url)).blob(); this.media.set(name, blob); blobs.push({ name, blob }); } if (blobs.length) { await db.putMany("media", blobs); this.mediaUrls.clear(); } }
           if (pulledN + pulledC + pulledR) this.treeCache.clear();
         }
+        await this.checkInbox(gh);
         progress("Preparing upload");
         const { files, hashes } = await GitHubSync.shard({
           notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(),
@@ -227,6 +228,8 @@ export class Store {
     this.dirty = await db.getMeta<boolean>("syncDirty", false);
     this.syncLog = await db.getMeta<SyncLogEntry[]>("syncLog", []);
     this.dismissedPairs = new Set(await db.getMeta<string[]>("dismissedPairs", []));
+    this.inbox = await db.getMeta<typeof this.inbox>("inbox", []);
+    this.packLog = await db.getMeta<typeof this.packLog>("packLog", []);
     this.mergeLog = await db.getMeta<typeof this.mergeLog>("mergeLog2", []);
     this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) } };
     this.loaded = true;
@@ -365,6 +368,56 @@ export class Store {
     const prev = await db.getMeta<unknown[]>("mergeLog", []); await db.setMeta("mergeLog", [...prev, { at: now, name: c.name ?? "", merges: log }]);
     this.bump(); this.touch();
     return `${merged} duplicate groups merged (${dropped} notes removed), ${moved.toLocaleString()} cards moved to new categories, ${tagged.toLocaleString()} tags added${c.review?.length ? `, ${c.review.length} similar pairs tagged needs-review::similar` : ""}.`;
+  }
+
+  // ---- inbox ---------------------------------------------------------------
+  inbox: { file: string; sha: string; at: number; pack: any }[] = [];
+  packLog: { id: string; name: string; at: number; noteIds: string[] }[] = [];
+  private async checkInbox(gh: GitHubSync) {
+    let files: { name: string; sha: string; size: number }[] = [];
+    try { files = await gh.listInbox(); } catch { return; }
+    const seen = new Set(await db.getMeta<string[]>("inboxSeen", []));
+    let changed = false;
+    for (const f of files) {
+      if (seen.has(f.sha) || this.inbox.some((x) => x.sha === f.sha)) continue;
+      try { const t = await gh.readInbox(f.name); if (!t) continue; const pack = JSON.parse(t); if (pack?.yuzu_pack === 1 || pack?.yuzu_curation === 1) { this.inbox.push({ file: f.name, sha: f.sha, at: Date.now(), pack }); changed = true; } seen.add(f.sha); }
+      catch { /* skip unreadable file */ }
+    }
+    // Files removed from the repo (handled on another device) leave the local inbox too.
+    const remote = new Set(files.map((f) => f.sha)); const before = this.inbox.length;
+    this.inbox = this.inbox.filter((x) => remote.has(x.sha)); if (this.inbox.length !== before) changed = true;
+    if (changed) { await db.setMeta("inbox", this.inbox); await db.setMeta("inboxSeen", [...seen]); this.bump(); }
+  }
+  /** Add the chosen cards of an inbox pack, remember them for undo, and clear the file from the repo. */
+  async acceptInbox(sha: string, keepIndexes: number[] | "all"): Promise<string> {
+    const e = this.inbox.find((x) => x.sha === sha); if (!e) return "Not found";
+    let msg: string;
+    if (e.pack.yuzu_curation === 1) msg = await this.importCuration(e.pack);
+    else {
+      const cards = keepIndexes === "all" ? e.pack.cards : e.pack.cards.filter((_: unknown, i: number) => keepIndexes.includes(i));
+      const before = new Set(this.notes.keys());
+      msg = await this.importPack({ ...e.pack, cards });
+      const noteIds = [...this.notes.keys()].filter((id) => !before.has(id));
+      this.packLog = [{ id: e.pack.id ?? e.file, name: e.pack.name ?? e.file, at: Date.now(), noteIds }, ...this.packLog].slice(0, 50);
+      await db.setMeta("packLog", this.packLog);
+    }
+    await this.dismissInbox(sha);
+    return msg;
+  }
+  async dismissInbox(sha: string) {
+    const e = this.inbox.find((x) => x.sha === sha); if (!e) return;
+    this.inbox = this.inbox.filter((x) => x.sha !== sha); await db.setMeta("inbox", this.inbox); this.bump();
+    if (this.syncConfigured()) { const cfg = this.settings.sync; new GitHubSync({ owner: cfg.owner, repo: cfg.repo, token: cfg.token }).deleteInbox(e.file, e.sha).catch(() => {}); }
+  }
+  /** Remove every note a pack added (cards and history go with them). */
+  async removePack(id: string) {
+    const e = this.packLog.find((x) => x.id === id); if (!e) return 0;
+    const now = Date.now(); const dc: string[] = [];
+    for (const nid of e.noteIds) { if (!this.notes.has(nid)) continue; this.notes.delete(nid); this.tombstones["n:" + nid] = now; for (const c of this.cardsOfNote(nid)) { this.cards.delete(c.id); dc.push(c.id); } }
+    this.packLog = this.packLog.filter((x) => x.id !== id);
+    await this.persist("removing the pack", (async () => { await db.deleteMany("notes", e.noteIds); await db.deleteMany("cards", dc); await db.setMeta("tombstones", this.tombstones); await db.setMeta("packLog", this.packLog); })());
+    this.bump(); this.touch();
+    return e.noteIds.length;
   }
 
   // ---- media ---------------------------------------------------------------

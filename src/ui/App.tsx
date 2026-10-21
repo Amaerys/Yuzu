@@ -7,6 +7,7 @@ import { Study } from "./Study";
 import { IconToday, IconLibrary, IconProgress, IconSettings, YuzuMark } from "./icons";
 import { Progress } from "./Progress";
 import { Boss } from "./Boss";
+import { Inbox } from "./Inbox";
 
 type Tab = "today" | "library" | "progress" | "settings";
 
@@ -73,6 +74,7 @@ function AppInner() {
   const startStudy = (path: string, view: View = "decks") => setStudy({ path, view });
   const startBoss = (path: string, view: View, name: string) => setStudy({ path, view, boss: name });
   const [update, setUpdate] = useState<(() => void) | null>(null);
+  const [inbox, setInbox] = useState(false);
 
   useEffect(() => {
     const onUpdate = (e: Event) => setUpdate(() => (e as CustomEvent).detail as () => void);
@@ -91,15 +93,17 @@ function AppInner() {
 
   return (
     <div className="app">
-      {tab === "today" && <Today onStudy={startStudy} />}
+      {inbox ? <Inbox onClose={() => setInbox(false)} /> : <>
+      {tab === "today" && <Today onStudy={startStudy} onInbox={() => setInbox(true)} />}
       {tab === "library" && <Library onStudy={startStudy} onBoss={startBoss} />}
       {tab === "progress" && <Progress onBoss={startBoss} />}
-      {tab === "settings" && <Settings />}
+      {tab === "settings" && <Settings onInbox={() => setInbox(true)} />}
+      </>}
       {store.saveError && <div className="toast row" style={{ borderColor: "var(--again)" }}>Changes are not being saved ({store.saveError}). <button className="btn" style={{ minHeight: 32, padding: "4px 12px" }} onClick={downloadBackup}>Back up now</button></div>}
       {update && <div className="toast row">New version ready <button className="btn primary" style={{ minHeight: 32, padding: "4px 12px" }} onClick={update}>Update</button></div>}
       <nav className="tabs">
         {([["today", "Today", <IconToday />], ["library", "Library", <IconLibrary />], ["progress", "Progress", <IconProgress />], ["settings", "Settings", <IconSettings />]] as const).map(([k, label, icon]) => (
-          <button key={k} className={"tab" + (tab === k ? " active" : "")} onClick={() => setTab(k)}>{icon}{label}</button>
+          <button key={k} className={"tab" + (tab === k ? " active" : "")} onClick={() => { setTab(k); setInbox(false); }}>{icon}{label}</button>
         ))}
       </nav>
     </div>

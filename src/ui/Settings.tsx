@@ -10,7 +10,7 @@ import { noteTitle } from "../lib/render";
 
 declare const __VERSION__: string;
 
-export function Settings() {
+export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
   const fileRef = useRef<HTMLInputElement>(null);
   const restoreRef = useRef<HTMLInputElement>(null);
   const mediaRef = useRef<HTMLInputElement>(null);
@@ -90,6 +90,12 @@ export function Settings() {
           <button className="btn" disabled={busy} onClick={async () => { if (confirm("Remove all deck images from this device? Cards keep working, images show as placeholders until added again.")) setResult(`Removed ${await store.clearMedia()} images.`); }}>Remove</button>
         </div>
         {mediaMsg && <p className="small" style={{ marginBottom: 0 }}>{mediaMsg}</p>}
+      </div>
+
+      <h2>Inbox</h2>
+      <div className="card-box">
+        <p className="small muted" style={{ marginTop: 0 }}>Packs placed in the <b>inbox</b> folder of your sync repository arrive here on the next sync and wait for your review. {store.inbox.length ? `${store.inbox.length} waiting.` : "Nothing waiting."}{store.packLog.length ? ` ${store.packLog.length} packs added so far (removable).` : ""}</p>
+        <button className="btn block" onClick={onInbox}>Open inbox</button>
       </div>
 
       <h2>Sync between devices</h2>

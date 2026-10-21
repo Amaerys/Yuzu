@@ -7,6 +7,7 @@ const gh = fakeGitHub(); const browser = await chromium.launch(); const errors: 
 async function device(name: string) {
   const ctx = await browser.newContext({ viewport: { width: 420, height: 860 } }); const page = await ctx.newPage();
   page.on("pageerror", (e) => errors.push(name + ": " + e.message));
+  page.on("dialog", (d) => d.accept());
   await page.route("https://api.github.com/**", async (route) => {
     const req = route.request(); const res = await gh.fetchImpl(req.url(), { method: req.method(), body: req.postData() ?? undefined } as any);
     await route.fulfill({ status: res.status, body: await res.text(), contentType: "application/json" });
@@ -50,5 +51,15 @@ try {
   await B.waitForFunction(() => /pushed|Up to date|pulled/.test([...document.querySelectorAll("p.small")].map((p) => p.textContent).join(" ")) && !/Syncing/.test(document.body.innerText), null, { timeout: 60000 });
   await A.click("text=Sync now"); await A.waitForTimeout(2500); await B.click("text=Sync now"); await B.waitForTimeout(2500);
   console.log("after race — A:", await status(A), "|", await counts(A)); console.log("after race — B:", await status(B), "|", await counts(B));
+  // Inbox: a pack dropped into inbox/ shows up on A after a sync, is reviewed with one card dropped, added, then removed.
+  gh.drop("hyperk.yuzu.json", JSON.stringify({ yuzu_pack: 1, id: "test-pack", name: "Test pack", category: "Medicine::Specialties::Emergency Medicine::Test", cards: [{ id: "a", type: "cloze", text: "K+ > {{c1::5.0}}" }, { id: "b", type: "basic", front: "Q2", back: "A2" }, { id: "c", type: "basic", front: "Q3", back: "A3" }] }));
+  await A.click("text=Sync now"); await A.waitForTimeout(2500); await A.click("nav.tabs >> text=Today"); await A.waitForTimeout(300);
+  console.log("inbox card:", await A.locator("text=1 new pack from Claude").count());
+  await A.click("text=Review"); await A.waitForTimeout(300); await A.click("text=Test pack"); await A.waitForTimeout(300);
+  await A.click("text=Q3"); await A.waitForTimeout(200); await A.click("text=Add 2 cards"); await A.waitForTimeout(1500);
+  const n1 = await A.evaluate(() => (window as any).yuzu.notes.size); console.log("notes after add:", n1, "| inbox left:", await A.evaluate(() => (window as any).yuzu.inbox.length), "| repo inbox files:", Object.keys(gh.files()).filter((k) => k.startsWith("inbox/")).length);
+  await A.click("text=Remove"); await A.waitForTimeout(800);
+  console.log("notes after remove:", await A.evaluate(() => (window as any).yuzu.notes.size));
+  await B.click("text=Sync now"); await B.waitForTimeout(2500); console.log("B inbox after sync:", await B.evaluate(() => (window as any).yuzu.inbox.length), "B notes:", await B.evaluate(() => (window as any).yuzu.notes.size));
   console.log("history A:", await A.evaluate(() => [...document.querySelectorAll("details li")].map((l) => l.textContent?.replace(/^.*· /, "")).slice(0, 4)));
 } finally { console.log("errors:", errors.length ? errors : "none"); await browser.close(); server.kill(); }

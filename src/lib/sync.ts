@@ -105,6 +105,16 @@ export class GitHubSync {
     return res.text();
   }
 
+  /** Files waiting in inbox/ (packs dropped there by Claude or by hand). */
+  async listInbox(): Promise<{ name: string; sha: string; size: number }[]> {
+    const list = await this.api(`/contents/inbox?ref=${this.branch}`);
+    return Array.isArray(list) ? list.filter((f: any) => f.type === "file" && /\.json$/i.test(f.name)).map((f: any) => ({ name: f.name, sha: f.sha, size: f.size })) : [];
+  }
+  async readInbox(name: string): Promise<string | null> { return this.readFile(`inbox/${encodeURIComponent(name)}`); }
+  async deleteInbox(name: string, sha: string): Promise<void> {
+    await this.api(`/contents/inbox/${encodeURIComponent(name)}`, { method: "DELETE", body: JSON.stringify({ message: `Yuzu: inbox ${name} handled`, sha, branch: this.branch }) }, `remove inbox/${name}`);
+  }
+
   /** Head commit seen by the last pullManifest(); push() refuses to build on a different one (another device synced in between). */
   private seenHead: string | null | undefined = undefined;
 
