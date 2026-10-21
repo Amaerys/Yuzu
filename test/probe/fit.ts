@@ -1,0 +1,12 @@
+import fs from "node:fs"; import zlib from "node:zlib";
+import { importAnki } from "../../src/import/anki.ts";
+import { fit, calibration, samplesFrom, logLoss } from "../../src/scheduler/optimize.ts";
+import { DEFAULT_W } from "../../src/scheduler/fsrs.ts";
+const bytes = new Uint8Array(fs.readFileSync("/home/claude/final/Finalcollex.colpkg"));
+const r = await importAnki(bytes, { inflateRaw: async (d) => new Uint8Array(zlib.inflateRawSync(d)), zstd: async (d) => new Uint8Array(zlib.zstdDecompressSync(d)) });
+const s = samplesFrom(r.reviews); console.log("reviews", r.reviews.length, "sequences", s.length, "predictions", logLoss(DEFAULT_W, s).n);
+const t0 = Date.now(); const res = fit(r.reviews, DEFAULT_W, { iterations: 120 });
+console.log("fit in", ((Date.now() - t0) / 1000).toFixed(1), "s: loss", res.before.toFixed(4), "→", res.after.toFixed(4), "n", res.n);
+console.log("w", res.w.map((x) => +x.toFixed(3)).join(", "));
+console.log("calibration (default):", calibration(r.reviews, DEFAULT_W).map((c) => `${c.bucket}: pred ${(c.predicted * 100).toFixed(0)} obs ${(c.observed * 100).toFixed(0)} (n=${c.n})`).join(" | "));
+console.log("calibration (fitted):", calibration(r.reviews, res.w).map((c) => `${c.bucket}: pred ${(c.predicted * 100).toFixed(0)} obs ${(c.observed * 100).toFixed(0)} (n=${c.n})`).join(" | "));

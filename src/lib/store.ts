@@ -1,9 +1,11 @@
 // In-memory collection + persistence + derived views (category tree, study queue, stats).
 import type { Card, CardState, Note, Notetype, Rating, Review } from "./model";
 import * as db from "./db";
-import { rate, DEFAULT_CONFIG, type SchedulerConfig, DAY } from "../scheduler/fsrs";
+import { rate, replay, retrievability, DEFAULT_CONFIG, type SchedulerConfig, DAY } from "../scheduler/fsrs";
+import { fit as fitWeights, calibration as calib } from "../scheduler/optimize";
 import type { ImportResult } from "../import/anki";
 import { parsePack, describePack } from "../import/pack";
+import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { GitHubSync, SyncError, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
 export interface Settings {
@@ -17,12 +19,18 @@ export interface Settings {
   burySiblings: boolean;
   restDays: number;       // streak-protected days per week
   pins: { view: View; path: string }[];
+  /** Scheduler fit: when it last ran, on how many predictions, and the log-loss before/after. */
+  fit: { at: number; n: number; before: number; after: number } | null;
+  /** Mastery thresholds in days of stability. */
+  mastery: { developing: number; mastered: number; durable: number };
+  leechThreshold: number;
   smart: SmartDeck[];
   sync: { owner: string; repo: string; token: string; auto: boolean };
 }
 export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
+  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8,
 };
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
 export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number; pending?: boolean }
@@ -213,6 +221,8 @@ export class Store {
     this.tombstones = await db.getMeta<Record<string, number>>("tombstones", {});
     this.dirty = await db.getMeta<boolean>("syncDirty", false);
     this.syncLog = await db.getMeta<SyncLogEntry[]>("syncLog", []);
+    this.dismissedPairs = new Set(await db.getMeta<string[]>("dismissedPairs", []));
+    this.mergeLog = await db.getMeta<typeof this.mergeLog>("mergeLog2", []);
     this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) } };
     this.loaded = true;
     if (this.syncConfigured()) this.syncStatus = { state: "idle", message: "Ready", at: 0 };
@@ -220,6 +230,9 @@ export class Store {
     if (typeof window !== "undefined") {
       // Ask the browser not to evict our data under storage pressure (silently ignored where unsupported).
       navigator.storage?.persist?.().catch(() => {});
+      // Re-fit the scheduler in the background once enough new reviews have accumulated.
+      const since = this.settings.fit ? this.reviews.filter((r) => r.ts > this.settings.fit!.at).length : this.reviews.length;
+      if (since >= 1000) setTimeout(() => { this.optimizeScheduler().catch(() => {}); }, 15000);
       this.scheduleSync(1500);
       window.addEventListener("online", () => this.scheduleSync(2000));
       // Leaving the app: push unsynced changes right away (the 8 s debounce would otherwise lose the last reviews
@@ -345,6 +358,49 @@ export class Store {
     const prev = await db.getMeta<unknown[]>("mergeLog", []); await db.setMeta("mergeLog", [...prev, { at: now, name: c.name ?? "", merges: log }]);
     this.bump(); this.touch();
     return `${merged} duplicate groups merged (${dropped} notes removed), ${moved.toLocaleString()} cards moved to new categories, ${tagged.toLocaleString()} tags added${c.review?.length ? `, ${c.review.length} similar pairs tagged needs-review::similar` : ""}.`;
+  }
+
+  // ---- duplicates --------------------------------------------------------
+  dismissedPairs = new Set<string>();
+  mergeLog: { at: number; keep: string; dropped: Note[]; cards: Card[]; keepBefore: Note; keepCardsBefore: Card[] }[] = [];
+  cardsOfNote(nid: string): Card[] { const out: Card[] = []; for (const c of this.cards.values()) if (c.nid === nid) out.push(c); return out; }
+  similarPairs() { return similarPairs(this.notes.values(), this.dismissedPairs); }
+  /** Merge note `drop` into `keep` (tags united, stronger scheduling kept); the dropped note can be restored from the merge log. */
+  async mergeNotes(keepId: string, dropId: string) {
+    const keep = this.notes.get(keepId), drop = this.notes.get(dropId); if (!keep || !drop || keepId === dropId) return;
+    const now = Date.now(); const keepCards = this.cardsOfNote(keepId), dropCards = this.cardsOfNote(dropId);
+    const m = mergeInto(keep, keepCards, drop, dropCards, now);
+    this.notes.set(keepId, m.note); for (const c of m.cards) this.cards.set(c.id, c);
+    this.notes.delete(dropId); for (const c of dropCards) this.cards.delete(c.id);
+    this.tombstones["n:" + dropId] = now;
+    this.mergeLog = [{ at: now, keep: keepId, dropped: [drop], cards: dropCards, keepBefore: keep, keepCardsBefore: keepCards }, ...this.mergeLog].slice(0, 200);
+    await this.persist("merging the cards", (async () => {
+      await db.putOne("notes", m.note); await db.putMany("cards", m.cards); await db.deleteMany("notes", [dropId]); await db.deleteMany("cards", dropCards.map((c) => c.id));
+      await db.setMeta("tombstones", this.tombstones); await db.setMeta("mergeLog2", this.mergeLog);
+    })());
+    this.bump(); this.touch();
+  }
+  /** Keep both notes: drop the review tag and remember the pair so it is not offered again. */
+  async keepBoth(a: string, b: string) {
+    const now = Date.now(); const out: Note[] = [];
+    for (const id of [a, b]) { const n = this.notes.get(id); if (n && n.tags.includes(SIMILAR_TAG)) { const m = { ...n, tags: n.tags.filter((t) => t !== SIMILAR_TAG), modified: now }; this.notes.set(id, m); out.push(m); } }
+    this.dismissedPairs.add([a, b].sort().join("|"));
+    await this.persist("updating the cards", (async () => { await db.putMany("notes", out); await db.setMeta("dismissedPairs", [...this.dismissedPairs]); })());
+    this.bump(); this.touch();
+  }
+  async undoMerge(at: number) {
+    const e = this.mergeLog.find((x) => x.at === at); if (!e) return;
+    const now = Date.now();
+    this.notes.set(e.keep, { ...e.keepBefore, modified: now }); for (const c of e.keepCardsBefore) this.cards.set(c.id, { ...c, mod: now });
+    for (const n of e.dropped) { this.notes.set(n.id, { ...n, modified: now }); delete this.tombstones["n:" + n.id]; }
+    for (const c of e.cards) this.cards.set(c.id, { ...c, mod: now });
+    this.mergeLog = this.mergeLog.filter((x) => x.at !== at);
+    await this.persist("undoing the merge", (async () => {
+      await db.putMany("notes", [this.notes.get(e.keep)!, ...e.dropped.map((n) => this.notes.get(n.id)!)]);
+      await db.putMany("cards", [...e.keepCardsBefore, ...e.cards].map((c) => this.cards.get(c.id)!));
+      await db.setMeta("tombstones", this.tombstones); await db.setMeta("mergeLog2", this.mergeLog);
+    })());
+    this.bump(); this.touch();
   }
 
   async wipe() {
@@ -483,12 +539,82 @@ export class Store {
   async answer(cardId: string, g: Rating, durationMs = 0, now = Date.now()) {
     const card = this.cards.get(cardId);
     if (!card) return;
-    const { card: next, review } = rate(card, g, now, this.settings.scheduler, durationMs);
+    const { card: next, review, intervalDays } = rate(card, g, now, this.settings.scheduler, durationMs);
+    // Hesitant "Good" (much slower than usual) earns a slightly shorter interval: correct, but not yet fluent.
+    if (g === 3 && intervalDays >= 2 && durationMs > Math.max(15000, 2.5 * this.typicalAnswerMs())) next.due = now + Math.round((next.due - now) * 0.85);
     this.cards.set(cardId, next);
     this.reviews.push(review);
     await this.persist("saving the review", Promise.all([db.putOne("cards", next), db.putOne("reviews", review), db.setMeta("undo:" + review.id, card)]));
     this.bump(); this.touch();
     return next;
+  }
+
+  /** Median answer time over the last 200 reviews (ms), or 8 s when there is no history. */
+  typicalAnswerMs(): number {
+    const d = this.reviews.slice(-200).map((r) => r.durationMs).filter((x) => x > 500 && x < 120000).sort((a, b) => a - b);
+    return d.length >= 20 ? d[Math.floor(d.length / 2)] : 8000;
+  }
+
+  // ---- learning engine ----------------------------------------------------
+  fitting: { progress: number } | null = null;
+  /** Fit FSRS weights to this user's review log, then rebuild every reviewed card's memory state with them. */
+  async optimizeScheduler(): Promise<string> {
+    if (this.fitting) return "Already running";
+    this.fitting = { progress: 0 }; this.bump();
+    try {
+      const res = await fitWeights(this.reviews, this.settings.scheduler.w, { iterations: 120, yieldEvery: 1, onProgress: (i) => { this.fitting = { progress: i / 120 }; this.bump(); } });
+      if (res.iterations === 0) return `Not enough history yet (${res.n} usable reviews; needs about 400). Keep studying — this runs again automatically.`;
+      const gain = res.before > 0 ? (1 - res.after / res.before) * 100 : 0;
+      if (gain < 0.5) { await this.saveSettings({ fit: { at: Date.now(), n: res.n, before: res.before, after: res.after } }); return "Your weights were already close to optimal; nothing changed."; }
+      await this.saveSettings({ scheduler: { ...this.settings.scheduler, w: res.w }, fit: { at: Date.now(), n: res.n, before: res.before, after: res.after } });
+      const n = await this.rebuildMemory();
+      return `Scheduler tuned to your history: prediction error down ${gain.toFixed(0)}% over ${res.n.toLocaleString()} reviews; ${n.toLocaleString()} cards rescheduled.`;
+    } finally { this.fitting = null; this.bump(); }
+  }
+  /** Recompute stability/difficulty/due for every reviewed card from its review log with the current weights. */
+  async rebuildMemory(): Promise<number> {
+    const by = new Map<string, Review[]>();
+    for (const r of this.reviews) (by.get(r.cid) ?? by.set(r.cid, []).get(r.cid)!).push(r);
+    const now = Date.now(); const out: Card[] = [];
+    for (const [cid, list] of by) {
+      const c = this.cards.get(cid); if (!c || c.state === "new") continue;
+      const r = replay(c, list.sort((a, b) => a.ts - b.ts), this.settings.scheduler.w, this.settings.scheduler.desiredRetention);
+      out.push({ ...r, suspended: c.suspended, flag: c.flag, source: c.source, mod: now });
+    }
+    for (const c of out) this.cards.set(c.id, c);
+    await this.persist("rescheduling cards", db.putMany("cards", out));
+    this.bump(); this.touch();
+    return out.length;
+  }
+  calibration() { return calib(this.reviews, this.settings.scheduler.w); }
+  /** Mastery label of a card from its stability and current recall. */
+  masteryOf(c: Card, now = Date.now()): "unseen" | "learning" | "developing" | "mastered" | "durable" {
+    if (c.state === "new" || c.reps === 0) return "unseen";
+    const t = this.settings.mastery; const s = c.stability;
+    if (s < t.developing) return "learning";
+    if (s < t.mastered) return "developing";
+    const r = retrievability((now - c.lastReview) / DAY, s);
+    if (s >= t.durable && r >= 0.8) return "durable";
+    return "mastered";
+  }
+  /** Mastery distribution and average answer time (last 30 days) per system. */
+  masteryBySystem(now = Date.now()) {
+    const out = new Map<string, { unseen: number; learning: number; developing: number; mastered: number; durable: number; total: number; secs: number | null }>();
+    const get = (k: string) => out.get(k) ?? out.set(k, { unseen: 0, learning: 0, developing: 0, mastered: 0, durable: 0, total: 0, secs: null }).get(k)!;
+    for (const c of this.cards.values()) {
+      if (c.suspended) continue;
+      const n = this.notes.get(c.nid); if (!n) continue;
+      const m = this.masteryOf(c, now);
+      for (const t of n.tags) if (t.startsWith("auto::System::")) { const e = get(t.slice(14)); e[m]++; e.total++; }
+    }
+    const sum = new Map<string, { ms: number; n: number }>();
+    for (const r of this.reviews) {
+      if (r.ts < now - 30 * DAY || !r.durationMs || r.durationMs > 120000) continue;
+      const n = this.notes.get(this.cards.get(r.cid)?.nid ?? ""); if (!n) continue;
+      for (const t of n.tags) if (t.startsWith("auto::System::")) { const e = sum.get(t.slice(14)) ?? sum.set(t.slice(14), { ms: 0, n: 0 }).get(t.slice(14))!; e.ms += r.durationMs; e.n++; }
+    }
+    for (const [k, v] of sum) if (out.has(k) && v.n >= 5) out.get(k)!.secs = v.ms / v.n / 1000;
+    return out;
   }
 
   async undoLast(): Promise<boolean> {

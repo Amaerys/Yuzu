@@ -24,3 +24,17 @@ test("pack revision: cards with id/replaces update in place, new cloze numbers a
   assert.equal(r2.cards.filter((c) => c.nid === r1.notes[0].id).length, 2);
   assert.equal(parsePack(v2, r2.notes).unchanged, 2);
 });
+
+test("duplicates: similar pairs and merge keep the stronger history and union tags", async () => {
+  const { similarPairs, mergeInto } = await import("../src/lib/dupes.ts");
+  const mk = (id: string, text: string, tags: string[]) => ({ id, ntid: "t", guid: id, fields: [text, ""], tags, created: 0, modified: 0 });
+  const a = mk("a", "Which language center is the center for language comprehension? Wernicke area", ["needs-review::similar", "x"]);
+  const b = mk("b", "Which language center is the center for language comprehension? Wernicke's area", ["needs-review::similar", "y"]);
+  const c = mk("c", "Treatment of PDA involves indomethacin", ["needs-review::similar"]);
+  const pairs = similarPairs([a, b, c]);
+  assert.equal(pairs.length, 1); assert.deepEqual([pairs[0][0], pairs[0][1]].sort(), ["a", "b"]);
+  const card = (id: string, nid: string, reps: number) => ({ id, nid, ord: 0, state: "review" as const, suspended: false, flag: 0, due: 1, stability: reps, difficulty: 5, reps, lapses: 0, lastReview: reps, step: 0, created: 0, mod: 0, source: "M" });
+  const m = mergeInto(a, [card("a0", "a", 1)], b, [card("b0", "b", 7)], 100);
+  assert.deepEqual(m.note.tags.sort(), ["x", "y"]);
+  assert.equal(m.cards[0].id, "a0"); assert.equal(m.cards[0].reps, 7, "stronger scheduling copied onto the kept card");
+});

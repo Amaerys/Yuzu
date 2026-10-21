@@ -5,6 +5,7 @@ import { SYSTEM_NAMES } from "../lib/classify";
 import type { Card, CardState } from "../lib/model";
 import { IconChevron, IconPlay, IconClose, IconPin } from "./icons";
 import { useEffect, useRef } from "react";
+import { Duplicates } from "./Duplicates";
 
 function findNode(root: TreeNode, path: string): TreeNode | null {
   if (!path) return root;
@@ -65,7 +66,9 @@ export function Library({ onStudy }: { onStudy: (path: string, view: View) => vo
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [editSmart, setEditSmart] = useState<SmartDeck | null | "new">(null);
   const [moveTo, setMoveTo] = useState<string | null>(null);
+  const [tool, setTool] = useState<"dupes" | null>(null);
   const v = store.getVersion();
+  const similarCount = useMemo(() => store.similarPairs().length, [v]);
   const tree = store.tree(view === "smart" ? "decks" : view);
   const node = view === "smart" ? null : (findNode(tree, path) ?? tree);
   const crumbs = path ? path.split("::") : [];
@@ -103,10 +106,11 @@ export function Library({ onStudy }: { onStudy: (path: string, view: View) => vo
   const go = (p: string) => { setPath(p); setShowCards(false); setSelecting(false); setSelected(new Set()); };
   const doBulk = async (action: Parameters<typeof store.bulk>[1]) => { await store.bulk([...selected], action); setSelected(new Set()); setSelecting(false); };
   const title = view === "smart" ? (smart?.name ?? "Smart decks") : node!.name;
+  if (tool === "dupes") return <Duplicates onClose={() => setTool(null)} />;
 
   return (
     <div className="screen">
-      <h1>Library</h1>
+      <div className="row"><h1 className="grow" style={{ margin: 0 }}>Library</h1>{similarCount > 0 && <button className="chip orange" onClick={() => setTool("dupes")}>{similarCount} similar pairs</button>}</div>
       <div className="seg">
         {[...VIEWS, { id: "smart" as View, label: "Smart" }].map((x) => <button key={x.id} className={view === x.id ? "on" : ""} onClick={() => { setView(x.id); go(""); }}>{x.label}</button>)}
       </div>
