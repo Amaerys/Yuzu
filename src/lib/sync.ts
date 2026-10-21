@@ -38,7 +38,7 @@ export class GitHubSync {
   }
   private async api(path: string, init: RequestInit = {}): Promise<any> {
     const res = await fetch(this.base + path, { ...init, headers: this.headers({ ...(init.headers as any), ...(init.body ? { "Content-Type": "application/json" } : {}) }) });
-    if (res.status === 404) return null;
+    if (res.status === 404 || res.status === 409) return null; // 409 = "Git Repository is empty" (brand-new repo, no commits yet)
     if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
     return res.json();
   }
@@ -54,7 +54,7 @@ export class GitHubSync {
 
   private async readFile(path: string): Promise<string | null> {
     const res = await fetch(`${this.base}/contents/${path}?ref=${this.branch}`, { headers: this.headers({ Accept: "application/vnd.github.raw+json" }) });
-    if (res.status === 404) return null;
+    if (res.status === 404 || res.status === 409) return null;
     if (!res.ok) throw new Error(`GitHub ${res.status} reading ${path}`);
     return res.text();
   }

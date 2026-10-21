@@ -23,7 +23,7 @@ function fakeGitHub() {
       const b = tree[path]; if (!b) return new Response("", { status: 404 });
       return new Response(blobs.get(b)!, { status: 200 });
     }
-    if (p === "/git/ref/heads/main") return head ? json({ object: { sha: head } }) : new Response("", { status: 404 });
+    if (p === "/git/ref/heads/main") return head ? json({ object: { sha: head } }) : new Response(JSON.stringify({ message: "Git Repository is empty." }), { status: 409 });
     if (p.startsWith("/git/commits/") && m === "GET") return json({ tree: { sha: commits.get(p.slice(13))!.tree } });
     if (p === "/git/blobs" && m === "POST") { const s = sha(); blobs.set(s, dec(body.content)); return json({ sha: s }); }
     if (p === "/git/trees" && m === "POST") {
