@@ -22,3 +22,4 @@ export const IconChevron = () => (<svg viewBox="0 0 24 24" width="18" height="18
 export const IconPlay = () => (<svg viewBox="0 0 24 24" {...P}><path d="M7 4l12 8-12 8z" /></svg>);
 export const IconFlame = () => (<svg viewBox="0 0 24 24" {...P}><path d="M12 3c1 4 5 5 5 10a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-3-1-5 1-9z" /></svg>);
 export const IconInfo = () => (<svg viewBox="0 0 24 24" {...P}><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></svg>);
+export const IconPin = () => (<svg viewBox="0 0 24 24" {...P}><path d="M9 4h6l-1 6 3 3v2H7v-2l3-3z" /><path d="M12 15v6" /></svg>);

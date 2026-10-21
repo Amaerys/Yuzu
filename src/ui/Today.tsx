@@ -1,4 +1,4 @@
-import { store } from "../lib/store";
+import { store, type View } from "../lib/store";
 import { YuzuMark, IconPlay, IconFlame } from "./icons";
 import { DAY } from "../scheduler/fsrs";
 
@@ -25,7 +25,12 @@ export function YuzuGoal({ value, max, size = 104 }: { value: number; max: numbe
   );
 }
 
-export function Today({ onStudy }: { onStudy: (path: string) => void }) {
+export function Today({ onStudy }: { onStudy: (path: string, view?: View) => void }) {
+  const pins = store.settings.pins.map((p) => {
+    const cards = store.cardsIn(p.path, p.view); const now = Date.now();
+    const name = p.view === "smart" ? (store.settings.smart.find((s) => s.id === p.path)?.name ?? "Smart deck") : (p.path.split("::").pop() || "All");
+    return { ...p, name, due: cards.filter((c) => !c.suspended && c.state !== "new" && c.due <= now).length, fresh: cards.filter((c) => !c.suspended && c.state === "new").length };
+  });
   const tree = store.tree();
   const stats = store.stats();
   const queue = store.queue("");
@@ -75,6 +80,14 @@ export function Today({ onStudy }: { onStudy: (path: string) => void }) {
               </div>
             ))}
           </div>
+          {pins.length > 0 && (<><h2>Pinned</h2>
+            {pins.map((p) => (
+              <button key={p.view + p.path} className="tree-row" style={{ width: "100%", textAlign: "left" }} onClick={() => onStudy(p.path, p.view)}>
+                <span className="name">{p.name} <span className="small muted">{p.view}</span></span>
+                <span className="counts"><span className="c-due">{p.due}</span><span className="c-new">{p.fresh}</span></span>
+                <span className="muted"><IconPlay /></span>
+              </button>
+            ))}</>)}
           {top.length > 0 && (<><h2>By category</h2>
             {top.map((c) => (
               <button key={c.path} className="tree-row" style={{ width: "100%", textAlign: "left" }} onClick={() => onStudy(c.path)}>

@@ -15,15 +15,18 @@ export interface Settings {
   swipe: boolean;
   burySiblings: boolean;
   restDays: number;       // streak-protected days per week
+  pins: { view: View; path: string }[];
+  smart: SmartDeck[];
   sync: { owner: string; repo: string; token: string; auto: boolean };
 }
 export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
-  sync: { owner: "", repo: "yuzu-data", token: "", auto: true },
+  sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
 };
+export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
 export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number }
 
-export type View = "decks" | "systems" | "specialties" | "tags";
+export type View = "decks" | "systems" | "specialties" | "tags" | "smart";
 export const VIEWS: { id: View; label: string }[] = [
   { id: "decks", label: "Decks" }, { id: "systems", label: "Systems" }, { id: "specialties", label: "Specialties" }, { id: "tags", label: "Tags" },
 ];
@@ -105,7 +108,7 @@ export class Store {
 
   /** Paths a card belongs to in a given view (a card can sit in several categories). */
   paths(c: Card, view: View): string[] {
-    if (view === "decks") return [c.source];
+    if (view === "decks" || view === "smart") return [c.source];
     const n = this.notes.get(c.nid);
     if (!n) return [];
     if (view === "systems") {
@@ -237,8 +240,24 @@ export class Store {
     return root;
   }
 
+  /** Cards matching a smart deck: AND across groups, OR within a group. */
+  cardsMatching(sd: SmartDeck): Card[] {
+    const out: Card[] = [];
+    for (const c of this.cards.values()) {
+      if (sd.states.length && !sd.states.includes(c.state)) continue;
+      if (sd.decks.length && !sd.decks.some((d) => c.source === d || c.source.startsWith(d + "::"))) continue;
+      const n = this.notes.get(c.nid); if (!n) continue;
+      if (sd.systems.length && !sd.systems.some((x) => n.tags.includes("auto::System::" + x))) continue;
+      if (sd.specialties.length && !sd.specialties.some((x) => n.tags.includes("auto::Specialty::" + x))) continue;
+      if (sd.tags.length && !sd.tags.some((x) => n.tags.some((t) => t === x || t.startsWith(x + "::")))) continue;
+      out.push(c);
+    }
+    return out;
+  }
+
   cardsIn(path: string, view: View = "decks"): Card[] {
     const out: Card[] = [];
+    if (view === "smart") { const sd = this.settings.smart.find((x) => x.id === path); return sd ? this.cardsMatching(sd) : []; }
     if (!path) return [...this.cards.values()];
     for (const c of this.cards.values()) {
       if (this.paths(c, view).some((p) => p === path || p.startsWith(path + "::"))) out.push(c);
@@ -314,6 +333,38 @@ export class Store {
     await Promise.all([db.putOne("cards", prev), db.deleteMany("reviews", [last.id])]);
     this.bump();
     return true;
+  }
+
+  async bulk(cardIds: string[], action: { suspended?: boolean; flag?: number; addTag?: string; source?: string }) {
+    const now = Date.now(); const cards: Card[] = []; const notes: Note[] = [];
+    for (const id of cardIds) {
+      const c = this.cards.get(id); if (!c) continue;
+      const next = { ...c, mod: now };
+      if (action.suspended !== undefined) next.suspended = action.suspended;
+      if (action.flag !== undefined) next.flag = action.flag;
+      if (action.source) next.source = action.source;
+      this.cards.set(id, next); cards.push(next);
+      if (action.addTag) { const n = this.notes.get(c.nid); if (n && !n.tags.includes(action.addTag)) { const nn = { ...n, tags: [...n.tags, action.addTag], modified: now }; this.notes.set(n.id, nn); notes.push(nn); } }
+    }
+    await db.putMany("cards", cards); if (notes.length) await db.putMany("notes", notes);
+    this.bump(); this.touch();
+  }
+
+  /** Full backup as a plain object (token excluded). */
+  backup() {
+    const { sync, ...settings } = this.settings;
+    return { app: "yuzu", version: 1, at: Date.now(), settings: { ...settings, sync: { ...sync, token: "" } }, notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews };
+  }
+  async restore(data: any, onProgress?: (m: string, f: number) => void) {
+    if (data?.app !== "yuzu") throw new Error("Not a Yuzu backup file");
+    for (const nt of data.notetypes ?? []) this.notetypes.set(nt.id, nt);
+    const n = mergeNotes(this.notes, data.notes ?? []); const c = mergeCards(this.cards, data.cards ?? []);
+    const m = mergeReviews(this.reviews, data.reviews ?? []); this.reviews = m.list;
+    onProgress?.("Saving", 0.3);
+    await db.putMany("notetypes", data.notetypes ?? []); await db.putMany("notes", data.notes ?? [], 1000); await db.putMany("cards", data.cards ?? [], 2000); await db.putMany("reviews", data.reviews ?? [], 5000);
+    if (data.settings) { const { sync, ...rest } = data.settings; this.settings = { ...this.settings, ...rest, sync: { ...this.settings.sync, ...(sync ?? {}), token: this.settings.sync.token || sync?.token || "" } }; await db.setMeta("settings", this.settings); }
+    this.bump(); this.touch();
+    return { notes: n, cards: c, reviews: m.added };
   }
 
   async updateNote(noteId: string, fields: string[], userTags: string[]) {

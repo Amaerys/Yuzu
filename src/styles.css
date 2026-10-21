@@ -120,3 +120,7 @@ h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 .milestone.earned { opacity: 1; filter: none; border-color: rgba(242,211,75,.4); }
 .milestone b { display: block; font-size: 13px; }
 .milestone span { display: block; }
+
+.bulk-bar { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(76px + var(--safe-b)); background: var(--bg-2); border: 1px solid var(--line); border-radius: 14px; padding: 8px; display: flex; gap: 6px; align-items: center; z-index: 25; max-width: 96vw; overflow-x: auto; }
+.bulk-bar .btn { padding: 8px 10px; min-height: 36px; font-size: 13px; }
+.list-row input[type=checkbox] { width: 18px; height: 18px; }

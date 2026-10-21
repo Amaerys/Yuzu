@@ -40,6 +40,25 @@ try {
   console.log("cardio:", (await page.locator(".card-box .small.muted").first().innerText()));
   await page.click(".seg >> text=Specialties"); await page.waitForTimeout(200);
   await page.screenshot({ path: `${shots}/04c-specialties.png` });
+  // Smart deck: Cardiovascular + new
+  await page.click(".seg >> text=Smart"); await page.click("text=New smart deck");
+  await page.fill(".sheet input", "Cardio new");
+  await page.click(".sheet >> text=Cardiovascular"); await page.click(".sheet >> .chip >> text=new");
+  const matchTxt = await page.locator(".sheet p.small").innerText(); console.log("smart:", matchTxt.match(/[\d,]+ cards match/)?.[0]);
+  await page.click(".sheet >> text=Save"); await page.waitForTimeout(200);
+  await page.click("text=Cardio new"); await page.waitForSelector(".card-box");
+  await page.click('[aria-label="Pin"]'); await page.waitForTimeout(200);
+  // Bulk: show cards, select all, suspend
+  await page.click("text=Show cards in Cardio new"); await page.click("text=Select"); await page.click(".chip >> text=All");
+  await page.click(".bulk-bar >> text=Suspend"); await page.waitForTimeout(400);
+  console.log("after bulk suspend:", await page.locator(".card-box .small.muted").first().innerText());
+  await page.click("text=Select"); await page.click(".chip >> text=All"); await page.click(".bulk-bar >> text=Unsuspend"); await page.waitForTimeout(400);
+  await page.locator(".list-row").first().click(); await page.waitForSelector("text=Preview"); await page.screenshot({ path: `${shots}/04d-preview.png` });
+  await page.click('[aria-label="Close preview"]');
+  // Backup download
+  await page.click("nav.tabs >> text=Settings");
+  const [dl] = await Promise.all([page.waitForEvent("download"), page.click("text=Back up")]);
+  const bpath = await dl.path(); const bsize = bpath ? fs.statSync(bpath).size : 0; console.log("backup bytes:", bsize);
   await page.click("nav.tabs >> text=Today");
   await page.click("text=Study everything");
   await page.waitForSelector("text=cards ready");
