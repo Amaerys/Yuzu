@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { store, type TreeNode } from "../lib/store";
+import { store, VIEWS, type TreeNode, type View } from "../lib/store";
 import { noteTitle } from "../lib/render";
 import { IconChevron, IconPlay } from "./icons";
 
@@ -11,17 +11,18 @@ function findNode(root: TreeNode, path: string): TreeNode | null {
   return n;
 }
 
-export function Library({ onStudy }: { onStudy: (path: string) => void }) {
+export function Library({ onStudy }: { onStudy: (path: string, view: View) => void }) {
+  const [view, setView] = useState<View>("decks");
   const [path, setPath] = useState("");
   const [showCards, setShowCards] = useState(false);
   const [query, setQuery] = useState("");
-  const tree = store.tree();
+  const tree = store.tree(view);
   const node = findNode(tree, path) ?? tree;
   const crumbs = path ? path.split("::") : [];
 
   const list = useMemo(() => {
     if (!showCards && !query) return [];
-    const cards = store.cardsIn(path);
+    const cards = store.cardsIn(path, view);
     const q = query.trim().toLowerCase();
     const seen = new Set<string>();
     const out: { id: string; title: string; state: string; nt: string }[] = [];
@@ -36,7 +37,7 @@ export function Library({ onStudy }: { onStudy: (path: string) => void }) {
       if (out.length >= 300) break;
     }
     return out;
-  }, [path, showCards, query, store.getVersion()]);
+  }, [path, view, showCards, query, store.getVersion()]);
 
   if (store.cards.size === 0) {
     return (<div className="screen"><h1>Library</h1><div className="empty">No cards yet. Import your Anki collection from Settings.</div></div>);
@@ -45,6 +46,9 @@ export function Library({ onStudy }: { onStudy: (path: string) => void }) {
   return (
     <div className="screen">
       <h1>Library</h1>
+      <div className="seg">
+        {VIEWS.map((v) => <button key={v.id} className={view === v.id ? "on" : ""} onClick={() => { setView(v.id); setPath(""); setShowCards(false); }}>{v.label}</button>)}
+      </div>
       <div className="crumbs">
         <button onClick={() => { setPath(""); setShowCards(false); }}>All</button>
         {crumbs.map((c, i) => (
@@ -57,7 +61,7 @@ export function Library({ onStudy }: { onStudy: (path: string) => void }) {
             <div style={{ fontWeight: 700, fontSize: 18 }}>{node.name}</div>
             <div className="small muted">{node.total.toLocaleString()} cards · {node.suspended.toLocaleString()} suspended · {node.reviewed.toLocaleString()} studied</div>
           </div>
-          <button className="btn primary" onClick={() => onStudy(path)} disabled={node.due + node.newCount + node.learning === 0}><IconPlay /> Study</button>
+          <button className="btn primary" onClick={() => onStudy(path, view)} disabled={node.due + node.newCount + node.learning === 0}><IconPlay /> Study</button>
         </div>
         <div className="row small" style={{ marginTop: 10, gap: 14 }}>
           <span className="c-due">{node.due} due</span><span className="c-learn">{node.learning} learning</span><span className="c-new">{node.newCount} new</span>

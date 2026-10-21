@@ -13,6 +13,11 @@ export interface Settings {
 }
 export const DEFAULT_SETTINGS: Settings = { newPerDay: 20, dailyGoal: 60, rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "" };
 
+export type View = "decks" | "systems" | "specialties" | "tags";
+export const VIEWS: { id: View; label: string }[] = [
+  { id: "decks", label: "Decks" }, { id: "systems", label: "Systems" }, { id: "specialties", label: "Specialties" }, { id: "tags", label: "Tags" },
+];
+
 export interface TreeNode {
   name: string; path: string; children: TreeNode[];
   total: number; due: number; newCount: number; learning: number; suspended: number; reviewed: number;
@@ -31,11 +36,28 @@ export class Store {
   loaded = false;
   private listeners = new Set<Listener>();
   private version = 0;
-  private treeCache: { v: number; tree: TreeNode } | null = null;
+  private treeCache = new Map<View, { v: number; tree: TreeNode }>();
 
   subscribe = (l: Listener) => { this.listeners.add(l); return () => { this.listeners.delete(l); }; };
   getVersion = () => this.version;
-  private bump() { this.version++; this.treeCache = null; for (const l of this.listeners) l(); }
+  private bump() { this.version++; this.treeCache.clear(); for (const l of this.listeners) l(); }
+
+  /** Paths a card belongs to in a given view (a card can sit in several categories). */
+  paths(c: Card, view: View): string[] {
+    if (view === "decks") return [c.source];
+    const n = this.notes.get(c.nid);
+    if (!n) return [];
+    if (view === "systems") {
+      const p = n.tags.filter((t) => t.startsWith("auto::System::")).map((t) => t.slice(14));
+      return p.length ? p : ["Unclassified"];
+    }
+    if (view === "specialties") {
+      const p = n.tags.filter((t) => t.startsWith("auto::Specialty::")).map((t) => t.slice(17));
+      return p.length ? p : ["Other"];
+    }
+    const p = n.tags.filter((t) => !t.startsWith("auto::"));
+    return p.length ? p : ["Untagged"];
+  }
 
   async load() {
     const snap = await db.loadSnapshot();
@@ -101,9 +123,10 @@ export class Store {
     return d.getTime();
   }
 
-  /** Category tree from the original deck paths. */
-  tree(): TreeNode {
-    if (this.treeCache && this.treeCache.v === this.version) return this.treeCache.tree;
+  /** Category tree for a view. Counts are per card; a card in two categories is counted in both. */
+  tree(view: View = "decks"): TreeNode {
+    const cached = this.treeCache.get(view);
+    if (cached && cached.v === this.version) return cached.tree;
     const root: TreeNode = { name: "All", path: "", children: [], total: 0, due: 0, newCount: 0, learning: 0, suspended: 0, reviewed: 0 };
     const now = Date.now();
     const index = new Map<string, TreeNode>();
@@ -119,27 +142,39 @@ export class Store {
       index.set(path, node);
       return node;
     };
+    const count = (node: TreeNode, c: Card) => {
+      node.total++;
+      if (c.suspended) { node.suspended++; return; }
+      if (c.state === "new") node.newCount++;
+      else if (c.due <= now) node.due++;
+      if (c.state === "learning" || c.state === "relearning") node.learning++;
+      if (c.reps > 0) node.reviewed++;
+    };
     for (const c of this.cards.values()) {
-      const parts = c.source.split("::");
-      for (let i = 0; i <= parts.length; i++) {
-        const node = i === 0 ? root : getNode(parts.slice(0, i).join("::"));
-        node.total++;
-        if (c.suspended) { node.suspended++; continue; }
-        if (c.state === "new") node.newCount++;
-        else if (c.due <= now) node.due++;
-        if (c.state === "learning" || c.state === "relearning") node.learning++;
-        if (c.reps > 0) node.reviewed++;
+      count(root, c);
+      const seen = new Set<string>();
+      for (const p of this.paths(c, view)) {
+        const parts = p.split("::");
+        for (let i = 1; i <= parts.length; i++) {
+          const key = parts.slice(0, i).join("::");
+          if (seen.has(key)) continue;
+          seen.add(key);
+          count(getNode(key), c);
+        }
       }
     }
     const sortRec = (n: TreeNode) => { n.children.sort((a, b) => a.name.localeCompare(b.name)); n.children.forEach(sortRec); };
     sortRec(root);
-    this.treeCache = { v: this.version, tree: root };
+    this.treeCache.set(view, { v: this.version, tree: root });
     return root;
   }
 
-  cardsIn(path: string): Card[] {
+  cardsIn(path: string, view: View = "decks"): Card[] {
     const out: Card[] = [];
-    for (const c of this.cards.values()) if (!path || c.source === path || c.source.startsWith(path + "::")) out.push(c);
+    if (!path) return [...this.cards.values()];
+    for (const c of this.cards.values()) {
+      if (this.paths(c, view).some((p) => p === path || p.startsWith(path + "::"))) out.push(c);
+    }
     return out;
   }
 
@@ -157,8 +192,8 @@ export class Store {
   }
 
   /** Build today's queue for a scope: learning due → reviews due → new (within budget). */
-  queue(path: string, now = Date.now()): Card[] {
-    const cards = this.cardsIn(path).filter((c) => !c.suspended);
+  queue(path: string, now = Date.now(), view: View = "decks"): Card[] {
+    const cards = this.cardsIn(path, view).filter((c) => !c.suspended);
     const learning = cards.filter((c) => (c.state === "learning" || c.state === "relearning") && c.due <= now).sort((a, b) => a.due - b.due);
     const review = cards.filter((c) => c.state === "review" && c.due <= now).sort((a, b) => a.due - b.due);
     const budget = Math.max(0, this.settings.newPerDay - this.reviewedToday(now).newCards);
@@ -176,9 +211,9 @@ export class Store {
   }
 
   /** Learning cards that are due later today (shown after the main queue drains). */
-  learningAhead(path: string, now = Date.now()): Card[] {
+  learningAhead(path: string, now = Date.now(), view: View = "decks"): Card[] {
     const end = this.dayStart(now) + DAY;
-    return this.cardsIn(path).filter((c) => !c.suspended && (c.state === "learning" || c.state === "relearning") && c.due > now && c.due < end).sort((a, b) => a.due - b.due);
+    return this.cardsIn(path, view).filter((c) => !c.suspended && (c.state === "learning" || c.state === "relearning") && c.due > now && c.due < end).sort((a, b) => a.due - b.due);
   }
 
   async answer(cardId: string, g: Rating, durationMs = 0, now = Date.now()) {

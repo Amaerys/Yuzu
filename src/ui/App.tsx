@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { store } from "../lib/store";
+import { store, type View } from "../lib/store";
 import { Today } from "./Today";
 import { Library } from "./Library";
 import { Settings } from "./Settings";
@@ -12,7 +12,8 @@ type Tab = "today" | "library" | "progress" | "settings";
 export function App() {
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
   const [tab, setTab] = useState<Tab>("today");
-  const [study, setStudy] = useState<string | null>(null);
+  const [study, setStudy] = useState<{ path: string; view: View } | null>(null);
+  const startStudy = (path: string, view: View = "decks") => setStudy({ path, view });
   const [update, setUpdate] = useState<(() => void) | null>(null);
 
   useEffect(() => {
@@ -24,12 +25,12 @@ export function App() {
   if (!store.loaded) {
     return <div className="screen" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "80dvh" }}><YuzuMark size={56} /></div>;
   }
-  if (study !== null) return <Study path={study} onExit={() => setStudy(null)} />;
+  if (study !== null) return <Study path={study.path} view={study.view} onExit={() => setStudy(null)} />;
 
   return (
     <div className="app">
-      {tab === "today" && <Today onStudy={setStudy} />}
-      {tab === "library" && <Library onStudy={setStudy} />}
+      {tab === "today" && <Today onStudy={startStudy} />}
+      {tab === "library" && <Library onStudy={startStudy} />}
       {tab === "progress" && <Progress />}
       {tab === "settings" && <Settings />}
       {update && <div className="toast row">New version ready <button className="btn primary" style={{ minHeight: 32, padding: "4px 12px" }} onClick={update}>Update</button></div>}

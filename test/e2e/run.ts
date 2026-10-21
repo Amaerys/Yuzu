@@ -32,6 +32,14 @@ try {
   await page.click("nav.tabs >> text=Library");
   await page.waitForSelector("text=Categories");
   await page.screenshot({ path: `${shots}/04-library.png` });
+  await page.click(".seg >> text=Systems");
+  await page.waitForSelector("text=Cardiovascular");
+  await page.screenshot({ path: `${shots}/04b-systems.png` });
+  await page.click("text=Cardiovascular");
+  await page.waitForSelector(".crumbs >> text=Cardiovascular");
+  console.log("cardio:", (await page.locator(".card-box .small.muted").first().innerText()));
+  await page.click(".seg >> text=Specialties"); await page.waitForTimeout(200);
+  await page.screenshot({ path: `${shots}/04c-specialties.png` });
   await page.click("nav.tabs >> text=Today");
   await page.click("text=Study everything");
   await page.waitForSelector(".card-host");

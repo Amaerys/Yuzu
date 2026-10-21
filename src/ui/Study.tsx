@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { store } from "../lib/store";
+import { store, type View } from "../lib/store";
 import type { Card, Rating } from "../lib/model";
 import { renderCard } from "../lib/render";
 import { previewIntervals } from "../scheduler/fsrs";
@@ -29,8 +29,8 @@ function CardView({ html, css, dark }: { html: string; css: string; dark: boolea
   return <div ref={ref} className={"card-host" + (dark ? " dark" : "")} />;
 }
 
-export function Study({ path, onExit }: { path: string; onExit: () => void }) {
-  const [queue, setQueue] = useState<Card[]>(() => store.queue(path));
+export function Study({ path, view = "decks", onExit }: { path: string; view?: View; onExit: () => void }) {
+  const [queue, setQueue] = useState<Card[]>(() => store.queue(path, Date.now(), view));
   const [idx, setIdx] = useState(0);
   const [showAnswer, setShowAnswer] = useState(false);
   const [doneCount, setDoneCount] = useState(0);
@@ -43,7 +43,7 @@ export function Study({ path, onExit }: { path: string; onExit: () => void }) {
   // Refill with learning cards that came due while studying.
   useEffect(() => {
     if (idx >= queue.length) {
-      const more = store.queue(path).filter((c) => !queue.some((q) => q.id === c.id));
+      const more = store.queue(path, Date.now(), view).filter((c) => !queue.some((q) => q.id === c.id));
       if (more.length) { setQueue(more); setIdx(0); }
     }
   }, [idx, queue, path]);
@@ -75,13 +75,13 @@ export function Study({ path, onExit }: { path: string; onExit: () => void }) {
   }
   async function undo() {
     if (await store.undoLast()) {
-      setQueue(store.queue(path)); setIdx(0); setDoneCount((d) => Math.max(0, d - 1)); flash("Undone");
+      setQueue(store.queue(path, Date.now(), view)); setIdx(0); setDoneCount((d) => Math.max(0, d - 1)); flash("Undone");
     } else flash("Nothing to undo");
   }
   function flash(msg: string) { setToast(msg); setTimeout(() => setToast(""), 1400); }
 
   if (!card) {
-    const ahead = store.learningAhead(path);
+    const ahead = store.learningAhead(path, Date.now(), view);
     return (
       <div className="study">
         <div className="study-top"><button className="icon-btn" onClick={onExit} aria-label="Close"><IconClose /></button><div className="grow" /></div>

@@ -6,6 +6,7 @@ import { SqliteReader, type Row } from "../lib/sqlite";
 import { decodeProto, protoInt, protoString } from "../lib/proto";
 import type { Card, CardState, ImportSummary, Note, Notetype, Rating, Review, Template } from "../lib/model";
 import { replay, DEFAULT_W, DAY } from "../scheduler/fsrs";
+import { classifyText, specialtiesFromSource } from "../lib/classify";
 
 export interface ImportEnv {
   inflateRaw: Inflate;
@@ -152,6 +153,12 @@ export async function importAnki(bytes: Uint8Array, env: ImportEnv, opts: { skip
   for (const nid of [...notes.keys()]) {
     if (!deckTagOfNote.has(nid)) { notes.delete(nid); skippedNotes++; continue; }
     const n = notes.get(nid)!;
+    const sources = [...deckTagOfNote.get(nid)!];
+    const medical = sources.some((s) => !/^(Languages|Medizin Wortschatz|Anamnese)/i.test(s));
+    if (medical) {
+      for (const sys of classifyText(n.fields.join(" "))) n.tags.push(`auto::System::${sys}`);
+      for (const sp of sources.flatMap(specialtiesFromSource)) n.tags.push(`auto::Specialty::${sp}`);
+    }
     n.tags = [...new Set(n.tags)];
   }
 
