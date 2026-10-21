@@ -70,7 +70,7 @@ export function rate(card: Card, g: Rating, now: number, cfg: SchedulerConfig = 
   const elapsedDays = card.lastReview ? (now - card.lastReview) / DAY : 0;
   const before = card.state;
   const mem = updateMemory(w, card, g, elapsedDays);
-  const next: Card = { ...card, ...mem, reps: card.reps + 1, lastReview: now };
+  const next: Card = { ...card, ...mem, reps: card.reps + 1, lastReview: now, mod: now };
   let intervalDays = 0;
 
   const scheduleReview = () => {
@@ -116,6 +116,7 @@ export function rate(card: Card, g: Rating, now: number, cfg: SchedulerConfig = 
 /** Rebuild a card's memory state from an ordered review history (e.g. imported from Anki). */
 export function replay(card: Card, reviews: Review[], w: number[] = DEFAULT_W, retention = 0.9): Card {
   let c: Card = { ...card, stability: 0, difficulty: 0, reps: 0, lapses: 0, lastReview: 0, state: "new", step: 0 };
+  if (reviews.length) c.mod = Math.max(c.mod ?? 0, reviews[reviews.length - 1].ts);
   let lastDay = 0;
   for (const r of reviews) {
     const elapsedDays = lastDay ? (r.ts - lastDay) / DAY : 0;

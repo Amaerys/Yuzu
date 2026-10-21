@@ -145,7 +145,7 @@ export async function importAnki(bytes: Uint8Array, env: ImportEnv, opts: { skip
     cards.set(id, {
       id, nid, ord: Number(r.ord), state, suspended: queue === -1, flag: Number(r.flags) & 7,
       due, stability: state === "review" ? Math.max(ivl, 0.1) : 0, difficulty: state === "new" ? 0 : 5,
-      reps: Number(r.reps), lapses: Number(r.lapses), lastReview: 0, step: 0, created: Number(r.id), source: deckPath,
+      reps: Number(r.reps), lapses: Number(r.lapses), lastReview: 0, step: 0, created: Number(r.id), mod: Number(r.mod) * 1000, source: deckPath,
     });
     (deckTagOfNote.get(nid) ?? deckTagOfNote.set(nid, new Set()).get(nid)!).add(deckPath.replace(/\s*::\s*/g, "::"));
   }

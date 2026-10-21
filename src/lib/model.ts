@@ -42,6 +42,7 @@ export interface Card {
   lastReview: number;    // ms, 0 if never
   step: number;          // position in learning/relearning steps
   created: number;
+  mod: number;           // ms, last change of any kind (review, suspend, flag); used by sync
   source: string;        // original deck path, kept for reference ("Medicine::EKG")
 }
 

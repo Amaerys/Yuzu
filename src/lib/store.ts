@@ -3,6 +3,7 @@ import type { Card, CardState, Note, Notetype, Rating, Review } from "./model";
 import * as db from "./db";
 import { rate, DEFAULT_CONFIG, type SchedulerConfig, DAY } from "../scheduler/fsrs";
 import type { ImportResult } from "../import/anki";
+import { GitHubSync, mergeCards, mergeNotes, mergeReviews, type Manifest, type SyncConfig } from "./sync";
 
 export interface Settings {
   newPerDay: number;
@@ -10,8 +11,17 @@ export interface Settings {
   rollover: number;       // hour of day when a new day starts
   scheduler: SchedulerConfig;
   deviceName: string;
+  nightCards: boolean;
+  swipe: boolean;
+  burySiblings: boolean;
+  restDays: number;       // streak-protected days per week
+  sync: { owner: string; repo: string; token: string; auto: boolean };
 }
-export const DEFAULT_SETTINGS: Settings = { newPerDay: 20, dailyGoal: 60, rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "" };
+export const DEFAULT_SETTINGS: Settings = {
+  newPerDay: 20, dailyGoal: 60, rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
+  sync: { owner: "", repo: "yuzu-data", token: "", auto: true },
+};
+export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number }
 
 export type View = "decks" | "systems" | "specialties" | "tags";
 export const VIEWS: { id: View; label: string }[] = [
@@ -34,6 +44,9 @@ export class Store {
   reviews: Review[] = [];
   settings: Settings = { ...DEFAULT_SETTINGS };
   loaded = false;
+  syncStatus: SyncStatus = { state: "off", message: "Not set up", at: 0 };
+  private dirty = false;
+  private syncTimer: ReturnType<typeof setTimeout> | null = null;
   private listeners = new Set<Listener>();
   private version = 0;
   private treeCache = new Map<View, { v: number; tree: TreeNode }>();
@@ -41,6 +54,54 @@ export class Store {
   subscribe = (l: Listener) => { this.listeners.add(l); return () => { this.listeners.delete(l); }; };
   getVersion = () => this.version;
   private bump() { this.version++; this.treeCache.clear(); for (const l of this.listeners) l(); }
+  private touch() { this.dirty = true; this.scheduleSync(); }
+
+  // ---- sync ---------------------------------------------------------------
+  syncConfigured(): boolean { const s = this.settings.sync; return !!(s.owner && s.repo && s.token); }
+  scheduleSync(delay = 8000) {
+    if (!this.syncConfigured() || !this.settings.sync.auto) return;
+    if (this.syncTimer) clearTimeout(this.syncTimer);
+    this.syncTimer = setTimeout(() => { this.syncTimer = null; this.sync().catch(() => {}); }, delay);
+  }
+  private setSync(state: SyncStatus["state"], message: string) { this.syncStatus = { state, message, at: Date.now() }; this.bump(); }
+
+  async sync(): Promise<void> {
+    if (!this.syncConfigured()) { this.setSync("off", "Not set up"); return; }
+    if (this.syncStatus.state === "syncing") return;
+    if (!navigator.onLine) { this.setSync("error", "Offline — will retry"); return; }
+    const cfg: SyncConfig = { owner: this.settings.sync.owner, repo: this.settings.sync.repo, token: this.settings.sync.token };
+    const gh = new GitHubSync(cfg);
+    this.setSync("syncing", "Syncing…");
+    try {
+      const known = await db.getMeta<Record<string, string>>("syncKnown", {});
+      const remote = await gh.pullManifest();
+      let pulledN = 0, pulledC = 0, pulledR = 0;
+      if (remote) {
+        const got = await gh.pullChanged(remote, known);
+        if (got.notetypes) { for (const nt of got.notetypes) this.notetypes.set(nt.id, nt); await db.putMany("notetypes", got.notetypes); }
+        if (got.notes) { const before = new Map(this.notes); pulledN = mergeNotes(this.notes, got.notes); const changed = got.notes.filter((n) => this.notes.get(n.id) === n && before.get(n.id) !== n); await db.putMany("notes", changed); }
+        if (got.cards) { const changed: Card[] = []; for (const c of got.cards) { const l = this.cards.get(c.id); if (!l || (c.mod ?? c.lastReview) > (l.mod ?? l.lastReview)) changed.push(c); } pulledC = mergeCards(this.cards, got.cards); await db.putMany("cards", changed); }
+        if (got.reviews) { const m = mergeReviews(this.reviews, got.reviews); pulledR = m.added; if (m.added) { const ids = new Set(this.reviews.map((r) => r.id)); await db.putMany("reviews", got.reviews.filter((r) => !ids.has(r.id))); this.reviews = m.list; } }
+        if (got.settings && (got.settings as any).updatedAt > ((this.settings as any).updatedAt ?? 0)) {
+          const { sync: _s, ...rest } = got.settings as any; this.settings = { ...this.settings, ...rest }; await db.setMeta("settings", this.settings);
+        }
+      }
+      const files = GitHubSync.shard({
+        notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews,
+        settings: { ...this.settings, sync: undefined, updatedAt: (this.settings as any).updatedAt ?? 0 },
+      });
+      const res = await gh.push(files, remote, this.settings.deviceName);
+      await db.setMeta("syncKnown", res.manifest.files);
+      this.dirty = false;
+      const parts = [];
+      if (pulledN + pulledC + pulledR) parts.push(`pulled ${pulledC} cards, ${pulledR} reviews`);
+      if (res.pushed) parts.push(`pushed ${res.pushed} files`);
+      this.setSync("ok", parts.length ? parts.join(", ") : "Up to date");
+      this.bump();
+    } catch (e: any) {
+      this.setSync("error", e?.message ?? String(e));
+    }
+  }
 
   /** Paths a card belongs to in a given view (a card can sit in several categories). */
   paths(c: Card, view: View): string[] {
@@ -65,15 +126,22 @@ export class Store {
     this.notes = new Map(snap.notes.map((n) => [n.id, n]));
     this.cards = new Map(snap.cards.map((c) => [c.id, c]));
     this.reviews = snap.reviews.sort((a, b) => a.ts - b.ts);
-    this.settings = { ...DEFAULT_SETTINGS, ...(await db.getMeta<Partial<Settings>>("settings", {})) };
+    const saved = await db.getMeta<Partial<Settings>>("settings", {});
+    this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) } };
     this.loaded = true;
+    if (this.syncConfigured()) this.syncStatus = { state: "idle", message: "Ready", at: 0 };
     this.bump();
+    if (typeof window !== "undefined") {
+      this.scheduleSync(1500);
+      window.addEventListener("online", () => this.scheduleSync(2000));
+      document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") this.scheduleSync(2000); });
+    }
   }
 
   async saveSettings(patch: Partial<Settings>) {
-    this.settings = { ...this.settings, ...patch };
+    this.settings = { ...this.settings, ...patch, updatedAt: Date.now() } as Settings;
     await db.setMeta("settings", this.settings);
-    this.bump();
+    this.bump(); this.touch();
   }
 
   /** Merge an import. Existing cards keep their Yuzu review state unless they had none. */
@@ -104,7 +172,7 @@ export class Store {
     onProgress?.("Saving reviews", 0.8);
     await db.putMany("reviews", addedReviews, 5000, (f) => onProgress?.("Saving reviews", 0.8 + f * 0.2));
     await db.setMeta("lastImport", { at: Date.now(), summary: res.summary });
-    this.bump();
+    this.bump(); this.touch();
     return { newNotes, newCards, updated, reviews: addedReviews.length };
   }
 
@@ -223,7 +291,7 @@ export class Store {
     this.cards.set(cardId, next);
     this.reviews.push(review);
     await Promise.all([db.putOne("cards", next), db.putOne("reviews", review), db.setMeta("undo:" + review.id, card)]);
-    this.bump();
+    this.bump(); this.touch();
     return next;
   }
 
@@ -241,11 +309,11 @@ export class Store {
 
   async setSuspended(cardId: string, suspended: boolean) {
     const c = this.cards.get(cardId); if (!c) return;
-    const next = { ...c, suspended }; this.cards.set(cardId, next); await db.putOne("cards", next); this.bump();
+    const next = { ...c, suspended, mod: Date.now() }; this.cards.set(cardId, next); await db.putOne("cards", next); this.bump(); this.touch();
   }
   async setFlag(cardId: string, flag: number) {
     const c = this.cards.get(cardId); if (!c) return;
-    const next = { ...c, flag }; this.cards.set(cardId, next); await db.putOne("cards", next); this.bump();
+    const next = { ...c, flag, mod: Date.now() }; this.cards.set(cardId, next); await db.putOne("cards", next); this.bump(); this.touch();
   }
 
   stats(now = Date.now()): Stats {

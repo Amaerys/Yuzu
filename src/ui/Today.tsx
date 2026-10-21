@@ -32,6 +32,7 @@ export function Today({ onStudy }: { onStudy: (path: string) => void }) {
   return (
     <div className="screen">
       <div className="row" style={{ marginBottom: 6 }}><YuzuMark /><h1 style={{ margin: 0 }}>Yuzu</h1><div className="grow" />
+        {store.syncConfigured() && <span className={"chip" + (store.syncStatus.state === "error" ? "" : " yuzu")} title={store.syncStatus.message} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "syncing" : store.syncStatus.state === "error" ? "sync failed" : "synced"}</span>}
         <span className="chip orange"><IconFlame /> {stats.streak} day{stats.streak === 1 ? "" : "s"}</span>
       </div>
       {store.cards.size === 0 ? (
