@@ -114,3 +114,9 @@ h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 .swipe-hint.good { left: 20px; color: var(--good); }
 .study-body { position: relative; }
 .btn.primary .muted { color: rgba(19,10,3,.65); }
+
+.milestones { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.milestone { display: flex; gap: 10px; align-items: center; background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 10px; opacity: .45; filter: grayscale(1); }
+.milestone.earned { opacity: 1; filter: none; border-color: rgba(242,211,75,.4); }
+.milestone b { display: block; font-size: 13px; }
+.milestone span { display: block; }

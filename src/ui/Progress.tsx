@@ -19,6 +19,8 @@ export function Progress() {
   let ok = 0, all = 0;
   for (const r of store.reviews) if (r.ts > now - 30 * DAY && r.state === "review") { all++; if (r.rating > 1) ok++; }
   const retention = all ? Math.round((ok / all) * 100) : null;
+  const systems = store.systemLevels();
+  const milestones = store.milestones();
   const tree = store.tree();
   const cats = tree.children.map((c) => ({ name: c.name, total: c.total, learned: c.reviewed, pct: c.total ? Math.round((c.reviewed / c.total) * 100) : 0 })).sort((a, b) => b.learned - a.learned);
 
@@ -52,6 +54,19 @@ export function Progress() {
           <span className="c-due">{counts.review.toLocaleString()} learned</span>
           <span className="muted">{counts.suspended.toLocaleString()} suspended</span>
         </div>
+      </div>
+      {systems.length > 0 && (<><h2>Systems</h2>
+        {systems.map((s) => (
+          <div key={s.name} className="list-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
+            <div className="row"><span className="chip yuzu">Lv {s.level}</span><span className="t">{s.name}</span><span className="small muted">{s.learned.toLocaleString()} / {s.total.toLocaleString()} learned</span></div>
+            <div className="bar" style={{ margin: 0, height: 6 }}><i style={{ width: `${s.pct}%` }} /></div>
+          </div>
+        ))}</>)}
+      <h2>Milestones</h2>
+      <div className="milestones">
+        {milestones.map((m) => (
+          <div key={m.id} className={"milestone" + (m.earned ? " earned" : "")}><YuzuMark size={22} /><div><b>{m.title}</b><span className="small muted">{m.earned && m.at ? new Date(m.at).toLocaleDateString() : m.detail}</span></div></div>
+        ))}
       </div>
       <h2>By category</h2>
       {cats.map((c) => (

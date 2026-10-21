@@ -342,12 +342,48 @@ export class Store {
     const days = new Set<number>();
     for (const r of this.reviews) days.add(Math.floor((r.ts - this.settings.rollover * 3600000) / DAY));
     let streak = 0; let d = Math.floor((now - this.settings.rollover * 3600000) / DAY);
-    if (!days.has(d)) d--;
-    while (days.has(d)) { streak++; d--; }
+    if (!days.has(d)) d--; // today isn't over yet
+    // Rest days: up to `restDays` missed days per 7 don't break the streak (shift weeks happen).
+    const rests: number[] = [];
+    while (true) {
+      if (days.has(d)) { streak++; d--; continue; }
+      const recent = rests.filter((r) => r - d < 7).length;
+      if (days.size && recent < this.settings.restDays && streak > 0) { rests.push(d); d--; continue; }
+      break;
+    }
     // Level: each level needs 15% more than the last, starting at 500 XP.
     let level = 1, floor = 0, need = 500;
     while (xp >= floor + need) { floor += need; need = Math.round(need * 1.15); level++; }
     return { today, goal: this.settings.dailyGoal, streak, xp, level, levelFloor: floor, levelCeil: floor + need, todayXp };
+  }
+
+  /** XP and level per system (from reviews of cards tagged auto::System::X). */
+  systemLevels(): { name: string; xp: number; level: number; pct: number; total: number; learned: number }[] {
+    const xpBy = new Map<string, number>(); const totals = new Map<string, { total: number; learned: number }>();
+    const sysOf = (c: Card) => (this.notes.get(c.nid)?.tags ?? []).filter((t) => t.startsWith("auto::System::")).map((t) => t.slice(14));
+    for (const c of this.cards.values()) for (const sname of sysOf(c)) { const t = totals.get(sname) ?? { total: 0, learned: 0 }; t.total++; if (c.state === "review") t.learned++; totals.set(sname, t); }
+    for (const r of this.reviews) { const c = this.cards.get(r.cid); if (!c) continue; const x = 10 + (r.rating === 4 ? 8 : r.rating === 3 ? 5 : r.rating === 2 ? 2 : 0); for (const sname of sysOf(c)) xpBy.set(sname, (xpBy.get(sname) ?? 0) + x); }
+    const out = [...totals.entries()].map(([name, t]) => {
+      const xp = xpBy.get(name) ?? 0; let level = 1, floor = 0, need = 150; while (xp >= floor + need) { floor += need; need = Math.round(need * 1.2); level++; }
+      return { name, xp, level, pct: Math.round(((xp - floor) / need) * 100), total: t.total, learned: t.learned };
+    });
+    return out.sort((a, b) => b.xp - a.xp || b.total - a.total);
+  }
+
+  milestones(): { id: string; title: string; detail: string; earned: boolean; at?: number }[] {
+    const stats = this.stats();
+    const reviewsAt = (n: number) => (this.reviews.length >= n ? this.reviews[n - 1].ts : undefined);
+    const learned = [...this.cards.values()].filter((c) => c.state === "review" && !c.suspended).length;
+    const sys = this.systemLevels();
+    const best = sys.filter((s) => s.total >= 50).sort((a, b) => b.learned / b.total - a.learned / a.total)[0];
+    const m = [
+      ...[100, 1000, 5000, 10000, 25000].map((n) => ({ id: `rev${n}`, title: `${n.toLocaleString()} reviews`, detail: "all time", earned: this.reviews.length >= n, at: reviewsAt(n) })),
+      ...[7, 30, 100, 365].map((n) => ({ id: `streak${n}`, title: `${n}-day streak`, detail: `current: ${stats.streak}`, earned: stats.streak >= n })),
+      ...[100, 500, 2000, 5000].map((n) => ({ id: `learned${n}`, title: `${n.toLocaleString()} cards learned`, detail: `now ${learned.toLocaleString()}`, earned: learned >= n })),
+      { id: "sys90", title: "A system 90% learned", detail: best ? `${best.name}: ${Math.round((best.learned / best.total) * 100)}%` : "", earned: !!best && best.learned / best.total >= 0.9 },
+      ...[5, 10, 20].map((n) => ({ id: `lvl${n}`, title: `Level ${n}`, detail: `now level ${stats.level}`, earned: stats.level >= n })),
+    ];
+    return m;
   }
 
   noteFor(card: Card): Note | undefined { return this.notes.get(card.nid); }

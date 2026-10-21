@@ -2,15 +2,25 @@ import { store } from "../lib/store";
 import { YuzuMark, IconPlay, IconFlame } from "./icons";
 import { DAY } from "../scheduler/fsrs";
 
-function Ring({ value, max, label }: { value: number; max: number; label: string }) {
-  const r = 40, c = 2 * Math.PI * r;
+/** A yuzu cut in half: 8 segments fill as the daily goal is reached. */
+export function YuzuGoal({ value, max, size = 104 }: { value: number; max: number; size?: number }) {
+  const segs = 8, cx = 52, cy = 52, R = 44, r0 = 10, gap = 0.06;
   const frac = Math.min(1, max ? value / max : 0);
+  const filled = frac * segs;
+  const wedge = (i: number) => {
+    const a0 = (i / segs) * Math.PI * 2 - Math.PI / 2 + gap, a1 = ((i + 1) / segs) * Math.PI * 2 - Math.PI / 2 - gap;
+    const p = (a: number, r: number) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
+    return `M ${p(a0, r0)} L ${p(a0, R)} A ${R} ${R} 0 0 1 ${p(a1, R)} L ${p(a1, r0)} A ${r0} ${r0} 0 0 0 ${p(a0, r0)} Z`;
+  };
   return (
-    <svg className="ring" viewBox="0 0 96 96">
-      <circle cx="48" cy="48" r={r} fill="none" stroke="var(--bg-3)" strokeWidth="9" />
-      <circle cx="48" cy="48" r={r} fill="none" stroke={frac >= 1 ? "var(--yuzu)" : "var(--orange)"} strokeWidth="9" strokeLinecap="round" strokeDasharray={`${c * frac} ${c}`} transform="rotate(-90 48 48)" />
-      <text x="48" y="45" textAnchor="middle" fontSize="20" fontWeight="700" fill="var(--text)">{value}</text>
-      <text x="48" y="62" textAnchor="middle" fontSize="10" fill="var(--muted)">{label}</text>
+    <svg width={size} height={size} viewBox="0 0 104 104" className="ring" aria-label={`${value} of ${max}`}>
+      <circle cx={cx} cy={cy} r={50} fill="#2a2415" stroke="#d9b93a" strokeWidth="3" />
+      {Array.from({ length: segs }, (_, i) => {
+        const f = Math.max(0, Math.min(1, filled - i));
+        return <path key={i} d={wedge(i)} fill={f >= 1 ? "var(--yuzu)" : f > 0 ? "var(--orange)" : "#3a3320"} opacity={f > 0 && f < 1 ? 0.5 + f * 0.5 : 1} />;
+      })}
+      <circle cx={cx} cy={cy} r={r0 - 2} fill="#1a160a" />
+      <text x={cx} y={cy + 4} textAnchor="middle" fontSize="11" fontWeight="700" fill="var(--text)">{Math.round(frac * 100)}%</text>
     </svg>
   );
 }
@@ -48,7 +58,7 @@ export function Today({ onStudy }: { onStudy: (path: string) => void }) {
               </div>
               <button className="btn primary" style={{ marginTop: 14 }} onClick={() => onStudy("")} disabled={queue.length === 0}><IconPlay /> Study everything</button>
             </div>
-            <Ring value={stats.today} max={stats.goal} label={`of ${stats.goal} goal`} />
+            <div style={{ textAlign: "center" }}><YuzuGoal value={stats.today} max={stats.goal} /><div className="small muted">{stats.today} / {stats.goal}</div></div>
           </div>
           <div className="stat-grid">
             <div className="stat"><b>Lv {stats.level}</b><span>{stats.xp - stats.levelFloor} / {stats.levelCeil - stats.levelFloor} XP</span></div>
