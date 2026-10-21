@@ -4,7 +4,7 @@ import * as db from "./db";
 import { rate, DEFAULT_CONFIG, type SchedulerConfig, DAY } from "../scheduler/fsrs";
 import type { ImportResult } from "../import/anki";
 import { parsePack, describePack } from "../import/pack";
-import { GitHubSync, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type Manifest, type SyncConfig } from "./sync";
+import { GitHubSync, SyncError, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
 export interface Settings {
   newPerDay: number;
@@ -25,7 +25,8 @@ export const DEFAULT_SETTINGS: Settings = {
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
 };
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
-export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number }
+export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number; pending?: boolean }
+export interface SyncLogEntry { at: number; ok: boolean; message: string; ms: number }
 
 export type View = "decks" | "systems" | "specialties" | "exams" | "tags" | "smart";
 export const VIEWS: { id: View; label: string }[] = [
@@ -54,6 +55,9 @@ export class Store {
   syncStatus: SyncStatus = { state: "off", message: "Not set up", at: 0 };
   private dirty = false;
   private syncTimer: ReturnType<typeof setTimeout> | null = null;
+  private syncAgain = false;
+  private shardCache: ShardCache = new Map();
+  syncLog: SyncLogEntry[] = [];
   private listeners = new Set<Listener>();
   private version = 0;
   private treeCache = new Map<View, { v: number; tree: TreeNode }>();
@@ -61,9 +65,10 @@ export class Store {
   subscribe = (l: Listener) => { this.listeners.add(l); return () => { this.listeners.delete(l); }; };
   getVersion = () => this.version;
   private bump() { this.version++; this.treeCache.clear(); for (const l of this.listeners) l(); }
-  private touch() { this.dirty = true; this.scheduleSync(); }
+  private touch() { if (!this.dirty) { this.dirty = true; db.setMeta("syncDirty", true).catch(() => {}); } this.scheduleSync(); }
 
   // ---- sync ---------------------------------------------------------------
+  hasUnsynced(): boolean { return this.dirty; }
   syncConfigured(): boolean { const s = this.settings.sync; return !!(s.owner && s.repo && s.token); }
   scheduleSync(delay = 8000) {
     if (!this.syncConfigured() || !this.settings.sync.auto) return;
@@ -72,52 +77,80 @@ export class Store {
   }
   private setSync(state: SyncStatus["state"], message: string) { this.syncStatus = { state, message, at: Date.now() }; this.bump(); }
 
-  async sync(): Promise<void> {
+  async sync(reason = "manual"): Promise<void> {
     if (!this.syncConfigured()) { this.setSync("off", "Not set up"); return; }
-    if (this.syncStatus.state === "syncing") return;
-    if (!navigator.onLine) { this.setSync("error", "Offline — will retry"); return; }
+    if (this.syncStatus.state === "syncing") { this.syncAgain = true; return; }
+    if (typeof navigator !== "undefined" && !navigator.onLine) { this.setSync("error", "Offline — will sync when back online"); return; }
     const cfg: SyncConfig = { owner: this.settings.sync.owner, repo: this.settings.sync.repo, token: this.settings.sync.token };
     const gh = new GitHubSync(cfg);
+    const t0 = Date.now();
     this.setSync("syncing", "Syncing…");
+    const progress = (m: string) => { this.syncStatus = { ...this.syncStatus, message: m }; this.bump(); };
     try {
-      const known = await db.getMeta<Record<string, string>>("syncKnown", {});
-      const remote = await gh.pullManifest();
-      let pulledN = 0, pulledC = 0, pulledR = 0;
-      if (remote) {
-        const got = await gh.pullChanged(remote, known);
-        if (got.notetypes) { for (const nt of got.notetypes) this.notetypes.set(nt.id, nt); await db.putMany("notetypes", got.notetypes); }
-        if (got.tombstones) {
-          this.tombstones = mergeTombstones(this.tombstones, got.tombstones); await db.setMeta("tombstones", this.tombstones);
-          const dn: string[] = [], dc: string[] = [];
-          for (const [k, t] of Object.entries(got.tombstones)) {
-            if (k.startsWith("n:")) { const id = k.slice(2); const n = this.notes.get(id); if (n && n.modified <= t) { this.notes.delete(id); dn.push(id); for (const c of this.cards.values()) if (c.nid === id) { this.cards.delete(c.id); dc.push(c.id); } } }
-            else if (k.startsWith("c:")) { const id = k.slice(2); const c = this.cards.get(id); if (c && (c.mod ?? c.lastReview) <= t) { this.cards.delete(id); dc.push(id); } }
+      let summary = "";
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const known = await db.getMeta<Record<string, string>>("syncKnown", {});
+        const remote = await gh.pullManifest();
+        let pulledN = 0, pulledC = 0, pulledR = 0;
+        if (remote) {
+          const got = await gh.pullChanged(remote, known, progress);
+          progress("Merging");
+          if (got.notetypes) { for (const nt of got.notetypes) this.notetypes.set(nt.id, nt); await db.putMany("notetypes", got.notetypes); }
+          if (got.tombstones) {
+            this.tombstones = mergeTombstones(this.tombstones, got.tombstones); await db.setMeta("tombstones", this.tombstones);
+            const dn: string[] = [], dc: string[] = [];
+            for (const [k, t] of Object.entries(got.tombstones)) {
+              if (k.startsWith("n:")) { const id = k.slice(2); const n = this.notes.get(id); if (n && n.modified <= t) { this.notes.delete(id); dn.push(id); for (const c of this.cards.values()) if (c.nid === id) { this.cards.delete(c.id); dc.push(c.id); } } }
+              else if (k.startsWith("c:")) { const id = k.slice(2); const c = this.cards.get(id); if (c && (c.mod ?? c.lastReview) <= t) { this.cards.delete(id); dc.push(id); } }
+            }
+            if (dn.length) await db.deleteMany("notes", dn); if (dc.length) await db.deleteMany("cards", dc);
           }
-          if (dn.length) await db.deleteMany("notes", dn); if (dc.length) await db.deleteMany("cards", dc);
+          if (got.notes) { const before = new Map(this.notes); pulledN = mergeNotes(this.notes, got.notes, this.tombstones); const changed = got.notes.filter((n) => this.notes.get(n.id) === n && before.get(n.id) !== n); await db.putMany("notes", changed); }
+          if (got.cards) { const changed: Card[] = []; for (const c of got.cards) { const l = this.cards.get(c.id); if ((this.tombstones["c:" + c.id] ?? -1) >= (c.mod ?? c.lastReview) || (this.tombstones["n:" + c.nid] ?? -1) >= (c.mod ?? c.lastReview)) continue; if (!l || (c.mod ?? c.lastReview) > (l.mod ?? l.lastReview)) changed.push(c); } pulledC = mergeCards(this.cards, got.cards, this.tombstones); await db.putMany("cards", changed); }
+          if (got.reviews) { const m = mergeReviews(this.reviews, got.reviews); pulledR = m.added; if (m.added) { const ids = new Set(this.reviews.map((r) => r.id)); await db.putMany("reviews", got.reviews.filter((r) => !ids.has(r.id))); this.reviews = m.list; } }
+          if (got.settings && (got.settings as any).updatedAt > ((this.settings as any).updatedAt ?? 0)) {
+            const { sync: _s, ...rest } = got.settings as any; this.settings = { ...this.settings, ...rest }; await db.setMeta("settings", this.settings);
+          }
+          if (pulledN + pulledC + pulledR) this.treeCache.clear();
         }
-        if (got.notes) { const before = new Map(this.notes); pulledN = mergeNotes(this.notes, got.notes, this.tombstones); const changed = got.notes.filter((n) => this.notes.get(n.id) === n && before.get(n.id) !== n); await db.putMany("notes", changed); }
-        if (got.cards) { const changed: Card[] = []; for (const c of got.cards) { const l = this.cards.get(c.id); if ((this.tombstones["c:" + c.id] ?? -1) >= (c.mod ?? c.lastReview) || (this.tombstones["n:" + c.nid] ?? -1) >= (c.mod ?? c.lastReview)) continue; if (!l || (c.mod ?? c.lastReview) > (l.mod ?? l.lastReview)) changed.push(c); } pulledC = mergeCards(this.cards, got.cards, this.tombstones); await db.putMany("cards", changed); }
-        if (got.reviews) { const m = mergeReviews(this.reviews, got.reviews); pulledR = m.added; if (m.added) { const ids = new Set(this.reviews.map((r) => r.id)); await db.putMany("reviews", got.reviews.filter((r) => !ids.has(r.id))); this.reviews = m.list; } }
-        if (got.settings && (got.settings as any).updatedAt > ((this.settings as any).updatedAt ?? 0)) {
-          const { sync: _s, ...rest } = got.settings as any; this.settings = { ...this.settings, ...rest }; await db.setMeta("settings", this.settings);
+        progress("Preparing upload");
+        const { files, hashes } = await GitHubSync.shard({
+          notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones,
+          settings: { ...this.settings, sync: undefined, updatedAt: (this.settings as any).updatedAt ?? 0 },
+        }, this.shardCache);
+        try {
+          const res = await gh.push(files, hashes, remote, this.settings.deviceName, progress);
+          await db.setMeta("syncKnown", res.manifest.files);
+          this.dirty = false; await db.setMeta("syncDirty", false);
+          const parts = [];
+          if (pulledN + pulledC + pulledR) parts.push(`pulled ${pulledC.toLocaleString()} cards, ${pulledR.toLocaleString()} reviews`);
+          if (res.pushed) parts.push(`pushed ${res.pushed} files`);
+          summary = parts.length ? parts.join(", ") : "Up to date";
+          break;
+        } catch (e) {
+          // Another device pushed in between: pull again and retry.
+          if (e instanceof SyncError && e.kind === "conflict" && attempt < 2) { progress("Another device synced at the same time — retrying"); continue; }
+          throw e;
         }
       }
-      const files = GitHubSync.shard({
-        notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones,
-        settings: { ...this.settings, sync: undefined, updatedAt: (this.settings as any).updatedAt ?? 0 },
-      });
-      const res = await gh.push(files, remote, this.settings.deviceName);
-      await db.setMeta("syncKnown", res.manifest.files);
-      this.dirty = false;
-      const parts = [];
-      if (pulledN + pulledC + pulledR) parts.push(`pulled ${pulledC} cards, ${pulledR} reviews`);
-      if (res.pushed) parts.push(`pushed ${res.pushed} files`);
-      this.setSync("ok", parts.length ? parts.join(", ") : "Up to date");
+      this.log(true, summary, Date.now() - t0);
+      this.setSync("ok", summary);
       this.bump();
     } catch (e: any) {
-      this.setSync("error", e?.message ?? String(e));
+      const msg = e?.message ?? String(e);
+      this.log(false, msg, Date.now() - t0);
+      this.setSync("error", msg);
+    } finally {
+      if (this.syncAgain) { this.syncAgain = false; this.scheduleSync(1000); }
     }
   }
+  /** Forget the known remote hashes and the shard cache so the next sync compares everything again. */
+  async resetSyncState() { await db.setMeta("syncKnown", {}); this.shardCache.clear(); this.dirty = true; await db.setMeta("syncDirty", true); }
+  private log(ok: boolean, message: string, ms: number) {
+    this.syncLog = [{ at: Date.now(), ok, message, ms }, ...this.syncLog].slice(0, 20);
+    db.setMeta("syncLog", this.syncLog).catch(() => {});
+  }
+
 
   /** Paths a card belongs to in a given view (a card can sit in several categories). */
   paths(c: Card, view: View): string[] {
@@ -149,6 +182,8 @@ export class Store {
     for (const m of await db.getAll<{ name: string; blob: Blob }>("media")) this.media.set(m.name, m.blob);
     const saved = await db.getMeta<Partial<Settings>>("settings", {});
     this.tombstones = await db.getMeta<Record<string, number>>("tombstones", {});
+    this.dirty = await db.getMeta<boolean>("syncDirty", false);
+    this.syncLog = await db.getMeta<SyncLogEntry[]>("syncLog", []);
     this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) } };
     this.loaded = true;
     if (this.syncConfigured()) this.syncStatus = { state: "idle", message: "Ready", at: 0 };
@@ -156,7 +191,12 @@ export class Store {
     if (typeof window !== "undefined") {
       this.scheduleSync(1500);
       window.addEventListener("online", () => this.scheduleSync(2000));
-      document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") this.scheduleSync(2000); });
+      // Leaving the app: push unsynced changes right away (the 8 s debounce would otherwise lose the last reviews
+      // if the phone kills the tab). Coming back: pull what other devices did.
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") { if (this.dirty && this.syncConfigured()) { if (this.syncTimer) clearTimeout(this.syncTimer); this.syncTimer = null; this.sync("hidden").catch(() => {}); } }
+        else this.scheduleSync(this.dirty ? 500 : 2000);
+      });
     }
   }
 

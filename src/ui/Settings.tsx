@@ -73,7 +73,16 @@ export function Settings() {
           <button className="btn" disabled={!store.syncConfigured()} onClick={async () => { setSyncMsg("Checking…"); const r = await new GitHubSync({ owner: sy.owner, repo: sy.repo, token: sy.token }).check(); setSyncMsg(r.message); }}>Test</button>
           <button className="btn primary grow" disabled={!store.syncConfigured() || store.syncStatus.state === "syncing"} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "Syncing…" : "Sync now"}</button>
         </div>
-        <p className="small muted" style={{ marginBottom: 0 }}>{syncMsg || store.syncStatus.message}{store.syncStatus.at ? ` · ${new Date(store.syncStatus.at).toLocaleTimeString()}` : ""}</p>
+        <p className="small" style={{ marginBottom: 0, color: store.syncStatus.state === "error" ? "var(--again)" : undefined }}>{syncMsg || store.syncStatus.message}{store.syncStatus.at && store.syncStatus.state !== "syncing" ? ` · ${new Date(store.syncStatus.at).toLocaleTimeString()}` : ""}</p>
+        {store.syncLog.length > 0 && (
+          <details style={{ marginTop: 8 }}>
+            <summary className="small muted">Sync history</summary>
+            <ul className="small" style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+              {store.syncLog.map((l) => <li key={l.at} className={l.ok ? "" : "muted"}>{new Date(l.at).toLocaleString()} · {l.ok ? "✓" : "✗"} {l.message} ({(l.ms / 1000).toFixed(1)} s)</li>)}
+            </ul>
+            <button className="btn" style={{ marginTop: 8 }} onClick={async () => { if (confirm("Forget what has been synced and compare everything with the repository again? Nothing is deleted; the next sync re-downloads and re-uploads changed files.")) { await store.resetSyncState(); store.sync(); } }}>Re-check everything</button>
+          </details>
+        )}
       </div>
 
       <h2>Studying</h2>

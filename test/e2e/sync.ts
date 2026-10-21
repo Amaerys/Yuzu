@@ -1,0 +1,54 @@
+// Two browser contexts ("devices") sync through an in-process fake GitHub.
+import { chromium } from "playwright"; import { spawn } from "node:child_process";
+import { fakeGitHub } from "../fake-github.ts";
+const port = 8771; const server = spawn("python3", ["-m", "http.server", String(port), "--bind", "127.0.0.1", "-d", "docs"], { stdio: "ignore" });
+await new Promise((r) => setTimeout(r, 800));
+const gh = fakeGitHub(); const browser = await chromium.launch(); const errors: string[] = [];
+async function device(name: string) {
+  const ctx = await browser.newContext({ viewport: { width: 420, height: 860 } }); const page = await ctx.newPage();
+  page.on("pageerror", (e) => errors.push(name + ": " + e.message));
+  await page.route("https://api.github.com/**", async (route) => {
+    const req = route.request(); const res = await gh.fetchImpl(req.url(), { method: req.method(), body: req.postData() ?? undefined } as any);
+    await route.fulfill({ status: res.status, body: await res.text(), contentType: "application/json" });
+  });
+  await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2500);
+  await page.click("nav.tabs >> text=Settings"); await page.waitForTimeout(400);
+  await page.fill('input[placeholder="Amaerys"]', "o"); await page.locator("label:has-text('Repository') + input, .field:has(label:has-text('Repository')) input").first().fill("r");
+  await page.fill('input[placeholder="github_pat_…"]', "t"); await page.fill('input[placeholder="S25 Ultra"]', name);
+  return page;
+}
+const status = (page: any) => page.evaluate(() => [...document.querySelectorAll("p.small")].map((p) => p.textContent ?? "").find((t) => /pushed|pulled|Up to date|Syncing|Download|Upload|rejected|Another|Offline|Conflict|GitHub \d/.test(t)));
+const counts = (page: any) => page.evaluate(() => document.body.innerText.match(/[\d,]+ notes · [\d,]+ cards · [\d,]+ reviews/)?.[0]);
+try {
+  const A = await device("A");
+  await A.locator('input[type=file]').first().setInputFiles("test/fixtures/medicine-legacy.apkg");
+  await A.waitForFunction(() => /Imported/.test(document.body.innerText), null, { timeout: 120000 });
+  await A.click("text=Sync now"); await A.waitForFunction(() => /pushed \d+ files/.test(document.body.innerText), null, { timeout: 120000 });
+  console.log("A first sync:", await status(A), "| commits", gh.commits(), "| files", Object.keys(gh.files()).length);
+  const B = await device("B");
+  await B.click("text=Sync now"); await B.waitForFunction(() => /pulled|Up to date/.test(document.body.innerText), null, { timeout: 120000 });
+  console.log("B first sync:", await status(B), "|", await counts(B), "(A:", await counts(A) + ")");
+  // B studies 3 cards, then leaves the app (visibility hidden → immediate sync)
+  const study = async (page: any, ratings: string[]) => {
+    await page.click("nav.tabs >> text=Today"); await page.waitForTimeout(300); await page.click("text=Study everything"); await page.waitForTimeout(400);
+    if (await page.locator("text=25 cards").count()) await page.click("text=25 cards");
+    for (const r of ratings) { await page.click("text=Show answer"); await page.click(`.answer-bar .${r}`); await page.waitForTimeout(250); }
+    await page.click('[aria-label="Close"]'); await page.waitForTimeout(300);
+  };
+  await study(B, ["good", "good", "good"]);
+  await B.evaluate(() => { Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true }); document.dispatchEvent(new Event("visibilitychange")); Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true }); });
+  await B.waitForTimeout(3000); await B.click("nav.tabs >> text=Settings"); await B.waitForTimeout(300);
+  console.log("B after study + leave:", await status(B), "|", await counts(B));
+  // A pulls B's reviews
+  await A.click("text=Sync now"); await A.waitForFunction(() => /pulled \d+ cards, 3 reviews/.test(document.body.innerText), null, { timeout: 60000 });
+  console.log("A pulled:", await status(A), "|", await counts(A));
+  // Race: both change something and sync at the same time.
+  await study(A, ["good"]); await study(B, ["again"]);
+  await A.click("nav.tabs >> text=Settings"); await B.click("nav.tabs >> text=Settings"); await A.waitForTimeout(300);
+  await Promise.all([A.click("text=Sync now"), B.click("text=Sync now")]);
+  await A.waitForFunction(() => /pushed|Up to date|pulled/.test([...document.querySelectorAll("p.small")].map((p) => p.textContent).join(" ")) && !/Syncing/.test(document.body.innerText), null, { timeout: 60000 });
+  await B.waitForFunction(() => /pushed|Up to date|pulled/.test([...document.querySelectorAll("p.small")].map((p) => p.textContent).join(" ")) && !/Syncing/.test(document.body.innerText), null, { timeout: 60000 });
+  await A.click("text=Sync now"); await A.waitForTimeout(2500); await B.click("text=Sync now"); await B.waitForTimeout(2500);
+  console.log("after race — A:", await status(A), "|", await counts(A)); console.log("after race — B:", await status(B), "|", await counts(B));
+  console.log("history A:", await A.evaluate(() => [...document.querySelectorAll("details li")].map((l) => l.textContent?.replace(/^.*· /, "")).slice(0, 4)));
+} finally { console.log("errors:", errors.length ? errors : "none"); await browser.close(); server.kill(); }
