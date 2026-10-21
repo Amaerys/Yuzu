@@ -728,7 +728,7 @@ export class Store {
     if (this.fitting) return "Already running";
     this.fitting = { progress: 0 }; this.bump();
     try {
-      const res = await fitWeights(this.reviews, this.settings.scheduler.w, { iterations: 120, yieldEvery: 1, onProgress: (i) => { this.fitting = { progress: i / 120 }; this.bump(); } });
+      const res = await fitWeights(this.reviews, this.settings.scheduler.w, { iterations: 120, yieldEvery: 1, onProgress: (i) => { if (i % 10 === 0) { this.fitting = { progress: i / 120 }; this.bump(); } } });
       if (res.iterations === 0) return `Not enough history yet (${res.n} usable reviews; needs about 400). Keep studying — this runs again automatically.`;
       const gain = res.before > 0 ? (1 - res.after / res.before) * 100 : 0;
       if (gain < 0.5) { await this.saveSettings({ fit: { at: Date.now(), n: res.n, before: res.before, after: res.after } }); return "Your weights were already close to optimal; nothing changed."; }

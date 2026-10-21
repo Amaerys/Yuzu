@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { store } from "../lib/store";
 import { importAnki } from "../import/anki";
 import { inflateRaw, zstd } from "../lib/decompress";
@@ -33,6 +33,10 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
   const [syncMsg, setSyncMsg] = useState("");
   const [fitMsg, setFitMsg] = useState("");
   const [revMsg, setRevMsg] = useState("");
+  const [scan, setScan] = useState(0); // bump to rescan the collection-wide numbers below
+  const reversible = useMemo(() => store.reversibleNotetypes(), [scan, revMsg]);
+  const mediaStat = useMemo(() => store.mediaStatus(), [scan, mediaMsg, result]);
+  const askList = useMemo(() => [...store.notes.values()].filter((n) => n.tags.includes("ask-claude")), [scan, result]);
   const [showToken, setShowToken] = useState(false);
   const sy = s.sync;
   const setSync = (patch: Partial<typeof sy>) => store.saveSettings({ sync: { ...sy, ...patch } });
@@ -83,7 +87,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
 
       <h2>Images</h2>
       <div className="card-box">
-        {(() => { const m = store.mediaStatus(); return <p className="small muted" style={{ marginTop: 0 }}>{m.stored.toLocaleString()} of {m.total.toLocaleString()} images your cards use are on this device ({(m.bytes / 1048576).toFixed(0)} MB). Images stay on each device; to add some, export a deck from Anki as .apkg <b>with media</b> and choose it here. Only the images your cards reference are kept, shrunk to fit a phone screen.</p>; })()}
+        {(() => { const m = mediaStat; return <p className="small muted" style={{ marginTop: 0 }}>{m.stored.toLocaleString()} of {m.total.toLocaleString()} images your cards use are on this device ({(m.bytes / 1048576).toFixed(0)} MB). Images stay on each device; to add some, export a deck from Anki as .apkg <b>with media</b> and choose it here. Only the images your cards reference are kept, shrunk to fit a phone screen.</p>; })()}
         <input ref={mediaRef} type="file" accept=".apkg,.colpkg,.zip" style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && onMedia(e.target.files[0])} />
         <div className="row">
           <button className="btn primary grow" disabled={busy} onClick={() => mediaRef.current?.click()}>{busy ? "Working…" : "Add images from a deck file"}</button>
@@ -148,11 +152,11 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           </select></div>
       </div>
 
-      {store.reversibleNotetypes().length > 0 && (<>
+      {reversible.length > 0 && (<>
         <h2>Language cards</h2>
         <div className="card-box">
           <p className="small muted" style={{ marginTop: 0 }}>Reverse cards ask the other direction (German → English as well as English → German). Turning one off suspends its reverse cards; history is kept.</p>
-          {store.reversibleNotetypes().map(({ nt, notes, on }) => (
+          {reversible.map(({ nt, notes, on }) => (
             <label key={nt.id} className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={on && !store.cardsOfNoteType(nt.id, 1).every((c) => c.suspended)} onChange={async (e) => { setRevMsg("Working…"); const n = await store.setReverse(nt.id, e.target.checked); setRevMsg(`${n?.toLocaleString()} reverse cards ${e.target.checked ? "added" : "suspended"}.`); }} /> {nt.name} <span className="muted">· {notes.toLocaleString()} notes</span></label>
           ))}
           {revMsg && <p className="small muted" style={{ marginBottom: 0 }}>{revMsg}</p>}
@@ -161,8 +165,8 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       <h2>Cards to ask Claude about</h2>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>Leeches you marked as "mixed up with something similar". Copy the list into the chat and I'll make contrast cards for them.</p>
-        {(() => { const list = [...store.notes.values()].filter((n) => n.tags.includes("ask-claude")); return list.length ? (
-          <div className="row"><span className="small grow">{list.length} card{list.length === 1 ? "" : "s"}</span><button className="btn" onClick={async () => { const text = list.map((n) => "- " + noteTitle(n)).join("\n"); try { await navigator.clipboard.writeText(text); setResult("Copied " + list.length + " cards."); } catch { prompt("Copy this list:", text); } }}>Copy list</button><button className="btn" onClick={async () => { for (const n of list) await store.updateNote(n.id, n.fields, n.tags.filter((t) => t !== "ask-claude" && !t.startsWith("auto::"))); }}>Clear</button></div>
+        {(() => { const list = askList; return list.length ? (
+          <div className="row"><span className="small grow">{list.length} card{list.length === 1 ? "" : "s"}</span><button className="btn" onClick={async () => { const text = list.map((n) => "- " + noteTitle(n)).join("\n"); try { await navigator.clipboard.writeText(text); setResult("Copied " + list.length + " cards."); } catch { prompt("Copy this list:", text); } }}>Copy list</button><button className="btn" onClick={async () => { for (const n of list) await store.updateNote(n.id, n.fields, n.tags.filter((t) => t !== "ask-claude" && !t.startsWith("auto::"))); setScan((x) => x + 1); }}>Clear</button></div>
         ) : <p className="small muted" style={{ margin: 0 }}>Nothing yet.</p>; })()}
       </div>
       <h2>Data</h2>
