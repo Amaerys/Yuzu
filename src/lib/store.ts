@@ -193,7 +193,15 @@ export class Store {
     const r = parsePack(json, this.notes.values());
     for (const nt of r.notetypes) this.notetypes.set(nt.id, nt);
     for (const n of r.notes) this.notes.set(n.id, n);
-    for (const c of r.cards) this.cards.set(c.id, c);
+    // Revised notes keep their existing cards (and scheduling); new cloze numbers get new cards,
+    // cloze numbers that disappeared are suspended rather than deleted so sync stays consistent.
+    const updated = new Set(r.updated); const cardsOut: Card[] = [];
+    for (const c of r.cards) { if (updated.has(c.nid) && this.cards.has(c.id)) continue; this.cards.set(c.id, c); cardsOut.push(c); }
+    if (updated.size) {
+      const keep = new Set(r.cards.map((c) => c.id)); const now = Date.now();
+      for (const c of this.cards.values()) if (updated.has(c.nid) && !keep.has(c.id) && !c.suspended) { const s2 = { ...c, suspended: true, mod: now }; this.cards.set(c.id, s2); cardsOut.push(s2); }
+    }
+    r.cards = cardsOut;
     const blobs: { name: string; blob: Blob }[] = [];
     for (const m of r.media) { const res = await fetch(m.dataUrl); const blob = await res.blob(); this.media.set(m.name, blob); blobs.push({ name: m.name, blob }); }
     await db.putMany("notetypes", r.notetypes); await db.putMany("notes", r.notes); await db.putMany("cards", r.cards); if (blobs.length) await db.putMany("media", blobs);

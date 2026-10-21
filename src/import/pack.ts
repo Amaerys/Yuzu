@@ -26,12 +26,15 @@ export const PACK_BASIC: Notetype = {
   templates: [{ name: "Card 1", qfmt: "{{#Image}}{{Image}}{{/Image}}{{Front}}", afmt: "{{FrontSide}}<hr id=answer>{{Back}}" }],
 };
 
-export interface PackCard { type?: "cloze" | "basic"; text?: string; extra?: string; front?: string; back?: string; image?: string; tags?: string[]; category?: string }
-export interface Pack { yuzu_pack: 1; name?: string; category?: string; tags?: string[]; cards: PackCard[] }
+// Revisions: give a card a stable "id" (unique within the pack) and re-importing a later version updates
+// that note in place, keeping its review history. "replaces" names an existing note id to update instead
+// (used to revise cards imported before they had ids).
+export interface PackCard { id?: string; replaces?: string; type?: "cloze" | "basic"; text?: string; extra?: string; front?: string; back?: string; image?: string; tags?: string[]; category?: string }
+export interface Pack { yuzu_pack: 1; id?: string; name?: string; category?: string; tags?: string[]; cards: PackCard[] }
 
-export interface PackResult { notetypes: Notetype[]; notes: Note[]; cards: Card[]; media: { name: string; dataUrl: string }[]; skipped: number; similar: number }
+export interface PackResult { notetypes: Notetype[]; notes: Note[]; cards: Card[]; media: { name: string; dataUrl: string }[]; skipped: number; similar: number; updated: string[]; unchanged: number }
 
-function hash(s: string): string {
+export function hash(s: string): string {
   let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
   for (let i = 0; i < s.length; i++) { const ch = s.charCodeAt(i); h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677); }
   h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
@@ -47,14 +50,16 @@ function shingles(s: string): Set<string> { const w = s.split(" "); return new S
 export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.now()): PackResult {
   const p = json as Pack;
   if (!p || p.yuzu_pack !== 1 || !Array.isArray(p.cards)) throw new Error("Not a Yuzu card pack (expected { yuzu_pack: 1, cards: [...] })");
+  const byId = new Map<string, Note>(); const normOf = new Map<string, string>();
   const exact = new Set<string>(); const index = new Map<string, Set<string>>(); const texts = new Map<string, Set<string>>();
   for (const n of existing) {
-    const t = normalizeText(n.fields.join(" ")); exact.add(t);
+    const t = normalizeText(n.fields.join(" ")); exact.add(t); byId.set(n.id, n); normOf.set(n.id, normalizeText(n.fields.slice(0, 2).join(" ")));
     const sh = shingles(t); texts.set(n.id, sh);
     for (const x of sh) (index.get(x) ?? index.set(x, new Set()).get(x)!).add(n.id);
   }
   const notes: Note[] = []; const cards: Card[] = []; const media: PackResult["media"] = [];
-  let skipped = 0, similar = 0;
+  let skipped = 0, similar = 0, unchanged = 0; const updated: string[] = [];
+  const packKey = p.id || p.name || "pack";
   const base = p.category || "Medicine::Inbox";
   p.cards.forEach((c, i) => {
     const type = c.type ?? (c.text ? "cloze" : "basic");
@@ -64,6 +69,18 @@ export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.no
     const fields = type === "cloze" ? [c.text ?? "", c.extra ?? "", imageField] : [c.front ?? "", c.back ?? "", imageField];
     if (!fields[0].trim()) { skipped++; return; }
     const norm = normalizeText(fields.slice(0, 2).join(" "));
+    const target = c.replaces && byId.has(c.replaces) ? c.replaces : c.id ? "p" + hash(packKey + "#" + c.id) : null;
+    const prev = target ? byId.get(target) : undefined;
+    if (prev) {
+      // Revision of a card already in the collection: update in place, keep scheduling.
+      const tags = [...new Set([...prev.tags.filter((t) => t !== "needs-review::similar"), ...(p.tags ?? []), ...(c.tags ?? [])])];
+      if (normOf.get(prev.id) === norm && prev.fields[2] === fields[2] && tags.length === prev.tags.length) { unchanged++; return; }
+      const ntid = nt.id;
+      notes.push({ ...prev, ntid, fields, tags, modified: Math.max(now + i, prev.modified + 1) });
+      updated.push(prev.id);
+      pushCards(prev.id, type, c, now + i);
+      return;
+    }
     if (exact.has(norm)) { skipped++; return; }
     // near-duplicate check against existing notes
     const sh = shingles(norm); const cand = new Map<string, number>();
@@ -74,22 +91,29 @@ export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.no
       if (j >= 0.6 || (containment >= 0.8 && Math.min(sh.size, other.size) >= 4)) { isSimilar = true; break; }
     }
     const tags = [...new Set([...(p.tags ?? []), ...(c.tags ?? []), ...(isSimilar ? ["needs-review::similar"] : [])])];
-    const id = "p" + hash(norm + "|" + nt.id);
+    const id = target ?? "p" + hash(norm + "|" + nt.id);
     const note: Note = { id, ntid: nt.id, guid: id, fields, tags, created: now + i, modified: now + i };
     notes.push(note); exact.add(norm);
     texts.set(id, sh); for (const x of sh) (index.get(x) ?? index.set(x, new Set()).get(x)!).add(id);
     if (isSimilar) similar++;
-    const clozeCount = type === "cloze" ? Math.max(1, new Set([...(c.text ?? "").matchAll(/\{\{c(\d+)::/g)].map((m) => Number(m[1]))).size) : 1;
-    const ords = type === "cloze" ? [...new Set([...(c.text ?? "").matchAll(/\{\{c(\d+)::/g)].map((m) => Number(m[1]) - 1))].sort((a, b) => a - b) : [0];
-    void clozeCount;
-    for (const ord of (ords.length ? ords : [0])) {
-      cards.push({ id: `${id}-${ord}`, nid: id, ord, state: "new", suspended: false, flag: 0, due: now + i, stability: 0, difficulty: 0, reps: 0, lapses: 0, lastReview: 0, step: 0, created: now + i, mod: now + i, source: c.category || base });
-    }
+    pushCards(id, type, c, now + i);
   });
-  return { notetypes: [PACK_CLOZE, PACK_BASIC], notes, cards, media, skipped, similar };
+  function pushCards(id: string, type: string, c: PackCard, t: number) {
+    for (const ord of packOrds(type, c.text)) {
+      cards.push({ id: `${id}-${ord}`, nid: id, ord, state: "new", suspended: false, flag: 0, due: t, stability: 0, difficulty: 0, reps: 0, lapses: 0, lastReview: 0, step: 0, created: t, mod: t, source: c.category || base });
+    }
+  }
+  return { notetypes: [PACK_CLOZE, PACK_BASIC], notes, cards, media, skipped, similar, updated, unchanged };
+}
+
+export function packOrds(type: string, text?: string): number[] {
+  if (type !== "cloze") return [0];
+  const o = [...new Set([...(text ?? "").matchAll(/\{\{c(\d+)::/g)].map((m) => Number(m[1]) - 1))].sort((a, b) => a - b);
+  return o.length ? o : [0];
 }
 
 export function describePack(r: PackResult): string {
-  const t = r.notes.slice(0, 3).map((n) => noteTitle(n)).join(" · ");
-  return `${r.notes.length} cards added${r.skipped ? `, ${r.skipped} skipped as duplicates` : ""}${r.similar ? `, ${r.similar} tagged needs-review::similar` : ""}${t ? ` — ${t}` : ""}`;
+  const added = r.notes.length - r.updated.length;
+  const t = r.notes.filter((n) => !r.updated.includes(n.id)).slice(0, 3).map((n) => noteTitle(n)).join(" · ");
+  return `${added} cards added${r.updated.length ? `, ${r.updated.length} updated (review history kept)` : ""}${r.unchanged ? `, ${r.unchanged} unchanged` : ""}${r.skipped ? `, ${r.skipped} skipped as duplicates` : ""}${r.similar ? `, ${r.similar} tagged needs-review::similar` : ""}${t ? ` — ${t}` : ""}`;
 }
