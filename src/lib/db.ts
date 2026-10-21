@@ -31,9 +31,13 @@ export function openDb(): Promise<IDBDatabase> {
       }
       for (const b of Object.values(BUCKETED)) if (!db.objectStoreNames.contains(b!)) db.createObjectStore(b!, { keyPath: "b" });
     };
-    req.onsuccess = () => migrate(req.result).then(() => resolve(req.result), reject);
+    req.onsuccess = () => {
+      // Another tab opened a newer schema: close so it can upgrade, then reload this tab.
+      req.result.onversionchange = () => { req.result.close(); dbp = null; if (typeof location !== "undefined") location.reload(); };
+      migrate(req.result).then(() => resolve(req.result), reject);
+    };
     req.onerror = () => reject(req.error);
-    req.onblocked = () => reject(new Error("Database blocked by another tab"));
+    req.onblocked = () => reject(new Error("The database is open in another Yuzu tab with an older version. Close the other tab and try again."));
   });
   return dbp;
 }

@@ -173,12 +173,41 @@ export class Store {
     return p.length ? p : ["Untagged"];
   }
 
+  loadError: string | null = null;
+  saveError: string | null = null;
+  /** Problems found while loading (orphan cards dropped, bad values fixed). Shown in Settings → Diagnostics. */
+  loadNotes: string[] = [];
+
+  /** Run a persistence write; a failure is remembered and shown instead of silently losing data. */
+  protected async persist<T>(what: string, p: Promise<T>): Promise<T | undefined> {
+    try { const r = await p; if (this.saveError) { this.saveError = null; this.bump(); } return r; }
+    catch (e: any) {
+      this.saveError = `${what}: ${e?.message ?? e}`; console.error("save failed", what, e); this.bump();
+      db.setMeta("lastError", { at: Date.now(), where: what, message: String(e?.message ?? e) }).catch(() => {});
+      return undefined;
+    }
+  }
+
   async load() {
+    try { await this.loadInner(); }
+    catch (e: any) { this.loadError = e?.message ?? String(e); console.error("load failed", e); this.bump(); throw e; }
+  }
+  private async loadInner() {
     const snap = await db.loadSnapshot();
     this.notetypes = new Map(snap.notetypes.map((n) => [n.id, n]));
     this.notes = new Map(snap.notes.map((n) => [n.id, n]));
-    this.cards = new Map(snap.cards.map((c) => [c.id, c]));
-    this.reviews = snap.reviews.sort((a, b) => a.ts - b.ts);
+    // Validate: drop cards whose note is gone, repair impossible numbers so the scheduler can never choke on them.
+    const cards = new Map<string, Card>(); let orphans = 0, repaired = 0;
+    for (const c of snap.cards) {
+      if (!this.notes.has(c.nid)) { orphans++; continue; }
+      let x = c;
+      if (!Number.isFinite(x.due) || !Number.isFinite(x.stability) || !Number.isFinite(x.difficulty) || !Number.isFinite(x.mod ?? 0)) { x = { ...x, due: Number.isFinite(x.due) ? x.due : Date.now(), stability: Number.isFinite(x.stability) ? x.stability : 0, difficulty: Number.isFinite(x.difficulty) ? x.difficulty : 5, mod: Number.isFinite(x.mod ?? 0) ? x.mod : x.lastReview }; repaired++; }
+      cards.set(x.id, x);
+    }
+    this.cards = cards;
+    if (orphans) this.loadNotes.push(`${orphans} cards without a note were ignored`);
+    if (repaired) this.loadNotes.push(`${repaired} cards had invalid scheduling values and were repaired`);
+    this.reviews = snap.reviews.filter((r) => Number.isFinite(r.ts)).sort((a, b) => a.ts - b.ts);
     for (const m of await db.getAll<{ name: string; blob: Blob }>("media")) this.media.set(m.name, m.blob);
     const saved = await db.getMeta<Partial<Settings>>("settings", {});
     this.tombstones = await db.getMeta<Record<string, number>>("tombstones", {});
@@ -189,6 +218,8 @@ export class Store {
     if (this.syncConfigured()) this.syncStatus = { state: "idle", message: "Ready", at: 0 };
     this.bump();
     if (typeof window !== "undefined") {
+      // Ask the browser not to evict our data under storage pressure (silently ignored where unsupported).
+      navigator.storage?.persist?.().catch(() => {});
       this.scheduleSync(1500);
       window.addEventListener("online", () => this.scheduleSync(2000));
       // Leaving the app: push unsynced changes right away (the 8 s debounce would otherwise lose the last reviews
@@ -455,7 +486,7 @@ export class Store {
     const { card: next, review } = rate(card, g, now, this.settings.scheduler, durationMs);
     this.cards.set(cardId, next);
     this.reviews.push(review);
-    await Promise.all([db.putOne("cards", next), db.putOne("reviews", review), db.setMeta("undo:" + review.id, card)]);
+    await this.persist("saving the review", Promise.all([db.putOne("cards", next), db.putOne("reviews", review), db.setMeta("undo:" + review.id, card)]));
     this.bump(); this.touch();
     return next;
   }
@@ -467,7 +498,7 @@ export class Store {
     if (!prev) return false;
     this.cards.set(prev.id, prev);
     this.reviews.pop();
-    await Promise.all([db.putOne("cards", prev), db.deleteMany("reviews", [last.id])]);
+    await this.persist("undoing the review", Promise.all([db.putOne("cards", prev), db.deleteMany("reviews", [last.id])]));
     this.bump();
     return true;
   }
@@ -483,7 +514,7 @@ export class Store {
       this.cards.set(id, next); cards.push(next);
       if (action.addTag) { const n = this.notes.get(c.nid); if (n && !n.tags.includes(action.addTag)) { const nn = { ...n, tags: [...n.tags, action.addTag], modified: now }; this.notes.set(n.id, nn); notes.push(nn); } }
     }
-    await db.putMany("cards", cards); if (notes.length) await db.putMany("notes", notes);
+    await this.persist("saving the bulk change", (async () => { await db.putMany("cards", cards); if (notes.length) await db.putMany("notes", notes); })());
     this.bump(); this.touch();
   }
 
@@ -513,16 +544,16 @@ export class Store {
     const n = this.notes.get(noteId); if (!n) return;
     const auto = n.tags.filter((t) => t.startsWith("auto::"));
     const next = { ...n, fields, tags: [...new Set([...userTags, ...auto])], modified: Date.now() };
-    this.notes.set(noteId, next); await db.putOne("notes", next); this.bump(); this.touch();
+    this.notes.set(noteId, next); await this.persist("editing the card", db.putOne("notes", next)); this.bump(); this.touch();
   }
 
   async setSuspended(cardId: string, suspended: boolean) {
     const c = this.cards.get(cardId); if (!c) return;
-    const next = { ...c, suspended, mod: Date.now() }; this.cards.set(cardId, next); await db.putOne("cards", next); this.bump(); this.touch();
+    const next = { ...c, suspended, mod: Date.now() }; this.cards.set(cardId, next); await this.persist("suspending the card", db.putOne("cards", next)); this.bump(); this.touch();
   }
   async setFlag(cardId: string, flag: number) {
     const c = this.cards.get(cardId); if (!c) return;
-    const next = { ...c, flag, mod: Date.now() }; this.cards.set(cardId, next); await db.putOne("cards", next); this.bump(); this.touch();
+    const next = { ...c, flag, mod: Date.now() }; this.cards.set(cardId, next); await this.persist("flagging the card", db.putOne("cards", next)); this.bump(); this.touch();
   }
 
   stats(now = Date.now()): Stats {

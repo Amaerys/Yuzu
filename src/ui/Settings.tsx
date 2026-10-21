@@ -5,6 +5,7 @@ import { inflateRaw, zstd } from "../lib/decompress";
 import { getMeta } from "../lib/db";
 import { useEffect } from "react";
 import { GitHubSync } from "../lib/sync";
+import { repairApp } from "./App";
 
 declare const __VERSION__: string;
 
@@ -24,6 +25,12 @@ export function Settings() {
   const setSync = (patch: Partial<typeof sy>) => store.saveSettings({ sync: { ...sy, ...patch } });
 
   useEffect(() => { getMeta<{ at: number; summary: any } | null>("lastImport", null).then(setLast); }, [result]);
+  // Closing the tab halfway through an import would leave it half applied: warn first.
+  useEffect(() => {
+    if (!busy) return;
+    const h = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", h); return () => window.removeEventListener("beforeunload", h);
+  }, [busy]);
 
   async function onFile(file: File) {
     setBusy(true); setResult(""); setFrac(0);
@@ -56,7 +63,7 @@ export function Settings() {
         <label className="row small" style={{ marginBottom: 10 }}><input type="checkbox" checked={skipLanguages} onChange={(e) => setSkipLanguages(e.target.checked)} /> Skip the Languages decks</label>
         <input ref={fileRef} type="file" accept=".colpkg,.apkg,.zip,.json" style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
         <button className="btn primary block" disabled={busy} onClick={() => fileRef.current?.click()}>{busy ? "Importing…" : "Choose file"}</button>
-        {busy && (<><div className="bar"><i style={{ width: `${frac * 100}%` }} /></div><div className="small muted">{msg}</div></>)}
+        {busy && (<><div className="bar"><i style={{ width: `${frac * 100}%` }} /></div><div className="small muted">{msg} — keep this tab open</div></>)}
         {result && <p className="small" style={{ marginBottom: 0 }}>{result}</p>}
         {last && !busy && <p className="small muted" style={{ marginBottom: 0 }}>Last import {new Date(last.at).toLocaleString()}: {last.summary?.cards?.toLocaleString()} cards.</p>}
       </div>
@@ -116,7 +123,29 @@ export function Settings() {
         </div>
         <button className="btn danger block" style={{ marginTop: 10 }} onClick={async () => { if (confirm("Delete all cards and reviews from this device?")) await store.wipe(); }}>Delete everything on this device</button>
       </div>
+      <h2>Diagnostics</h2>
+      <Diagnostics />
       <p className="small muted" style={{ textAlign: "center", marginTop: 24 }}>Yuzu {__VERSION__}</p>
+    </div>
+  );
+}
+
+function Diagnostics() {
+  const [info, setInfo] = useState<{ quota?: string; persisted?: string; lastError?: any; sw?: string }>({});
+  useEffect(() => { (async () => {
+    const out: typeof info = {};
+    try { const e = await navigator.storage?.estimate?.(); if (e?.usage !== undefined) out.quota = `${(e.usage / 1048576).toFixed(0)} MB used${e.quota ? ` of ${(e.quota / 1048576 / 1024).toFixed(1)} GB available` : ""}`; } catch { /* unsupported */ }
+    try { out.persisted = (await navigator.storage?.persisted?.()) ? "yes (browser will not evict it)" : "not guaranteed"; } catch { /* unsupported */ }
+    try { out.lastError = await getMeta<any>("lastError", null); } catch { /* ignore */ }
+    try { out.sw = (await navigator.serviceWorker?.getRegistration())?.active ? "active" : "none"; } catch { /* ignore */ }
+    setInfo(out);
+  })(); }, []);
+  return (
+    <div className="card-box small">
+      <div>Storage: {info.quota ?? "…"} · persistent: {info.persisted ?? "…"} · offline cache: {info.sw ?? "…"}</div>
+      {store.loadNotes.length > 0 && <div className="muted" style={{ marginTop: 6 }}>On load: {store.loadNotes.join("; ")}</div>}
+      {info.lastError && <div className="muted" style={{ marginTop: 6 }}>Last error ({new Date(info.lastError.at).toLocaleString()}, {info.lastError.where}): {info.lastError.message}</div>}
+      <button className="btn block" style={{ marginTop: 10 }} onClick={repairApp}>Repair app (reload the latest version, keep data)</button>
     </div>
   );
 }

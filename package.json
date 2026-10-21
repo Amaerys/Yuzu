@@ -6,7 +6,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --import tsx --test test/*.test.ts",
-    "e2e": "node --import tsx test/e2e/run.ts"
+    "e2e": "node --import tsx test/e2e/run.ts && node --import tsx test/e2e/sync.ts",
+    "check": "npx tsc --noEmit -p . && npm test && npm run build && npm run e2e"
   },
   "keywords": [],
   "author": "",

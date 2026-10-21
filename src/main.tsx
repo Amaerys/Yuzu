@@ -2,8 +2,16 @@ import { createRoot } from "react-dom/client";
 import { App } from "./ui/App";
 import { store } from "./lib/store";
 
-store.load().catch((e) => console.error("load failed", e));
+store.load().catch(() => { /* shown by the recovery screen */ });
 createRoot(document.getElementById("root")!).render(<App />);
+
+// Last-resort reporting: anything uncaught is remembered for Settings → Diagnostics.
+const remember = (where: string, e: unknown) => {
+  const message = (e as any)?.message ?? String(e);
+  import("./lib/db").then((db) => db.setMeta("lastError", { at: Date.now(), where, message }).catch(() => {})).catch(() => {});
+};
+window.addEventListener("error", (e) => remember("error", e.error ?? e.message));
+window.addEventListener("unhandledrejection", (e) => remember("promise", e.reason));
 
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
   window.addEventListener("load", async () => {
@@ -19,8 +27,11 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
         const nw = reg.installing;
         nw?.addEventListener("statechange", () => { if (nw.state === "installed" && navigator.serviceWorker.controller) notify(); });
       });
+      // Reload only when an *update* takes over, never on the very first install (that would reload the page
+      // under the user while they are importing, and lose the import).
+      const hadController = !!navigator.serviceWorker.controller;
       let reloading = false;
-      navigator.serviceWorker.addEventListener("controllerchange", () => { if (!reloading) { reloading = true; location.reload(); } });
+      navigator.serviceWorker.addEventListener("controllerchange", () => { if (hadController && !reloading) { reloading = true; location.reload(); } });
     } catch (e) { console.warn("sw", e); }
   });
 }

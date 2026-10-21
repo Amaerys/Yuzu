@@ -11,8 +11,8 @@ try {
   console.log("anki import:", ((Date.now() - t0) / 1000).toFixed(0), "s —", await page.evaluate(() => [...document.querySelectorAll("p.small")].map((p) => p.textContent).find((t) => /Imported|failed/.test(t ?? ""))));
   t0 = Date.now();
   await page.locator('input[type=file]').first().setInputFiles("/home/claude/final/curation.yuzu.json");
-  await page.waitForFunction(() => /merged|failed/.test(document.body.innerText), null, { timeout: 300000 });
-  console.log("curation:", ((Date.now() - t0) / 1000).toFixed(0), "s —", await page.evaluate(() => [...document.querySelectorAll("p.small")].map((p) => p.textContent).find((t) => /merged|failed/.test(t ?? ""))));
+  await page.waitForFunction(() => /duplicate groups merged|failed/.test(document.body.innerText), null, { timeout: 300000 });
+  console.log("curation:", ((Date.now() - t0) / 1000).toFixed(0), "s —", await page.evaluate(() => [...document.querySelectorAll("p.small")].map((p) => p.textContent).find((t) => /duplicate groups merged|failed/.test(t ?? ""))));
   const mem = await page.evaluate(() => (performance as any).memory ? Math.round((performance as any).memory.usedJSHeapSize / 1048576) + " MB heap" : "n/a"); console.log(mem);
   await page.click("nav.tabs >> text=Library");
   for (const v of ["Decks", "Systems", "Specialties", "Exams"]) { await page.click(`text=${v}`); await page.waitForTimeout(300); console.log(`\n[${v}]`, (await page.innerText("main, .screen")).split("\n").filter((l) => l.trim()).slice(0, 28).join(" | ")); }

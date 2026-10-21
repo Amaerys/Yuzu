@@ -3,6 +3,7 @@ import * as esbuild from "esbuild";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { execSync } from "node:child_process";
 
 const root = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const dist = path.join(root, "docs");
@@ -13,6 +14,9 @@ fs.rmSync(dist, { recursive: true, force: true });
 fs.mkdirSync(path.join(dist, "assets"), { recursive: true });
 
 const hash = (buf) => crypto.createHash("sha256").update(buf).digest("hex").slice(0, 10);
+
+// Type errors never reach the site: refuse to build on them.
+if (!watch) { try { execSync("npx tsc --noEmit -p .", { cwd: root, stdio: "inherit" }); } catch { console.error("build aborted: type errors"); process.exit(1); } }
 
 const result = await esbuild.build({
   entryPoints: [path.join(root, "src/main.tsx")],
