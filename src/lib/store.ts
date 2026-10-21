@@ -4,7 +4,7 @@ import * as db from "./db";
 import { rate, DEFAULT_CONFIG, type SchedulerConfig, DAY } from "../scheduler/fsrs";
 import type { ImportResult } from "../import/anki";
 import { parsePack, describePack } from "../import/pack";
-import { GitHubSync, mergeCards, mergeNotes, mergeReviews, type Manifest, type SyncConfig } from "./sync";
+import { GitHubSync, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type Manifest, type SyncConfig } from "./sync";
 
 export interface Settings {
   newPerDay: number;
@@ -27,9 +27,9 @@ export const DEFAULT_SETTINGS: Settings = {
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
 export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number }
 
-export type View = "decks" | "systems" | "specialties" | "tags" | "smart";
+export type View = "decks" | "systems" | "specialties" | "exams" | "tags" | "smart";
 export const VIEWS: { id: View; label: string }[] = [
-  { id: "decks", label: "Decks" }, { id: "systems", label: "Systems" }, { id: "specialties", label: "Specialties" }, { id: "tags", label: "Tags" },
+  { id: "decks", label: "Decks" }, { id: "systems", label: "Systems" }, { id: "specialties", label: "Specialties" }, { id: "exams", label: "Exams" }, { id: "tags", label: "Tags" },
 ];
 
 export interface TreeNode {
@@ -45,6 +45,7 @@ export class Store {
   notetypes = new Map<string, Notetype>();
   notes = new Map<string, Note>();
   cards = new Map<string, Card>();
+  tombstones: Record<string, number> = {};
   reviews: Review[] = [];
   media = new Map<string, Blob>();
   private mediaUrls = new Map<string, string>();
@@ -85,15 +86,24 @@ export class Store {
       if (remote) {
         const got = await gh.pullChanged(remote, known);
         if (got.notetypes) { for (const nt of got.notetypes) this.notetypes.set(nt.id, nt); await db.putMany("notetypes", got.notetypes); }
-        if (got.notes) { const before = new Map(this.notes); pulledN = mergeNotes(this.notes, got.notes); const changed = got.notes.filter((n) => this.notes.get(n.id) === n && before.get(n.id) !== n); await db.putMany("notes", changed); }
-        if (got.cards) { const changed: Card[] = []; for (const c of got.cards) { const l = this.cards.get(c.id); if (!l || (c.mod ?? c.lastReview) > (l.mod ?? l.lastReview)) changed.push(c); } pulledC = mergeCards(this.cards, got.cards); await db.putMany("cards", changed); }
+        if (got.tombstones) {
+          this.tombstones = mergeTombstones(this.tombstones, got.tombstones); await db.setMeta("tombstones", this.tombstones);
+          const dn: string[] = [], dc: string[] = [];
+          for (const [k, t] of Object.entries(got.tombstones)) {
+            if (k.startsWith("n:")) { const id = k.slice(2); const n = this.notes.get(id); if (n && n.modified <= t) { this.notes.delete(id); dn.push(id); for (const c of this.cards.values()) if (c.nid === id) { this.cards.delete(c.id); dc.push(c.id); } } }
+            else if (k.startsWith("c:")) { const id = k.slice(2); const c = this.cards.get(id); if (c && (c.mod ?? c.lastReview) <= t) { this.cards.delete(id); dc.push(id); } }
+          }
+          if (dn.length) await db.deleteMany("notes", dn); if (dc.length) await db.deleteMany("cards", dc);
+        }
+        if (got.notes) { const before = new Map(this.notes); pulledN = mergeNotes(this.notes, got.notes, this.tombstones); const changed = got.notes.filter((n) => this.notes.get(n.id) === n && before.get(n.id) !== n); await db.putMany("notes", changed); }
+        if (got.cards) { const changed: Card[] = []; for (const c of got.cards) { const l = this.cards.get(c.id); if ((this.tombstones["c:" + c.id] ?? -1) >= (c.mod ?? c.lastReview) || (this.tombstones["n:" + c.nid] ?? -1) >= (c.mod ?? c.lastReview)) continue; if (!l || (c.mod ?? c.lastReview) > (l.mod ?? l.lastReview)) changed.push(c); } pulledC = mergeCards(this.cards, got.cards, this.tombstones); await db.putMany("cards", changed); }
         if (got.reviews) { const m = mergeReviews(this.reviews, got.reviews); pulledR = m.added; if (m.added) { const ids = new Set(this.reviews.map((r) => r.id)); await db.putMany("reviews", got.reviews.filter((r) => !ids.has(r.id))); this.reviews = m.list; } }
         if (got.settings && (got.settings as any).updatedAt > ((this.settings as any).updatedAt ?? 0)) {
           const { sync: _s, ...rest } = got.settings as any; this.settings = { ...this.settings, ...rest }; await db.setMeta("settings", this.settings);
         }
       }
       const files = GitHubSync.shard({
-        notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews,
+        notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones,
         settings: { ...this.settings, sync: undefined, updatedAt: (this.settings as any).updatedAt ?? 0 },
       });
       const res = await gh.push(files, remote, this.settings.deviceName);
@@ -122,6 +132,10 @@ export class Store {
       const p = n.tags.filter((t) => t.startsWith("auto::Specialty::")).map((t) => t.slice(17));
       return p.length ? p : ["Other"];
     }
+    if (view === "exams") {
+      const p = n.tags.filter((t) => t.startsWith("auto::Exam::") || t.startsWith("auto::Level::")).map((t) => t.startsWith("auto::Exam::") ? t.slice(12) : "German level::" + t.slice(13));
+      return p.length ? p : ["No exam"];
+    }
     const p = n.tags.filter((t) => !t.startsWith("auto::"));
     return p.length ? p : ["Untagged"];
   }
@@ -134,6 +148,7 @@ export class Store {
     this.reviews = snap.reviews.sort((a, b) => a.ts - b.ts);
     for (const m of await db.getAll<{ name: string; blob: Blob }>("media")) this.media.set(m.name, m.blob);
     const saved = await db.getMeta<Partial<Settings>>("settings", {});
+    this.tombstones = await db.getMeta<Record<string, number>>("tombstones", {});
     this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) } };
     this.loaded = true;
     if (this.syncConfigured()) this.syncStatus = { state: "idle", message: "Ready", at: 0 };
@@ -155,27 +170,31 @@ export class Store {
   async applyImport(res: ImportResult, onProgress?: (msg: string, frac: number) => void) {
     for (const nt of res.notetypes) this.notetypes.set(nt.id, nt);
     let newNotes = 0, newCards = 0, updated = 0;
+    const notesOut: Note[] = []; const cardsOut: Card[] = [];
     for (const n of res.notes) {
+      if ((this.tombstones["n:" + n.id] ?? -1) >= n.modified) continue; // merged away in Yuzu
       const existing = this.notes.get(n.id);
       if (!existing) newNotes++; else if (existing.modified < n.modified) updated++; else continue;
-      this.notes.set(n.id, n);
+      // Keep tags added in Yuzu (auto::…, needs-review, pack tags) when Anki's version of the note is newer.
+      const merged = existing ? { ...n, tags: [...new Set([...n.tags, ...existing.tags.filter((t) => t.startsWith("auto::") || t.startsWith("needs-review::"))])] } : n;
+      this.notes.set(n.id, merged); notesOut.push(merged);
     }
     const knownReviewIds = new Set(this.reviews.map((r) => r.id));
     for (const c of res.cards) {
+      if ((this.tombstones["c:" + c.id] ?? -1) >= c.mod || (this.tombstones["n:" + c.nid] ?? -1) >= c.mod || !this.notes.has(c.nid)) continue;
       const existing = this.cards.get(c.id);
-      if (!existing) { this.cards.set(c.id, c); newCards++; continue; }
-      // Whichever side has the more recent review keeps its scheduling state.
-      if (c.lastReview >= existing.lastReview) this.cards.set(c.id, { ...c, flag: existing.flag });
-      else this.cards.set(c.id, { ...existing, source: c.source });
+      if (!existing) { this.cards.set(c.id, c); cardsOut.push(c); newCards++; continue; }
+      // Whichever side has the more recent review keeps its scheduling state. Yuzu owns the category (source) once imported.
+      if (c.lastReview > existing.lastReview) { const m = { ...c, flag: existing.flag, source: existing.source }; this.cards.set(c.id, m); cardsOut.push(m); }
     }
     const addedReviews = res.reviews.filter((r) => !knownReviewIds.has(r.id));
     this.reviews = this.reviews.concat(addedReviews).sort((a, b) => a.ts - b.ts);
     onProgress?.("Saving note types", 0.05);
     await db.putMany("notetypes", res.notetypes);
     onProgress?.("Saving notes", 0.1);
-    await db.putMany("notes", res.notes, 1000, (f) => onProgress?.("Saving notes", 0.1 + f * 0.4));
+    await db.putMany("notes", notesOut, 1000, (f) => onProgress?.("Saving notes", 0.1 + f * 0.4));
     onProgress?.("Saving cards", 0.5);
-    await db.putMany("cards", res.cards, 2000, (f) => onProgress?.("Saving cards", 0.5 + f * 0.3));
+    await db.putMany("cards", cardsOut, 2000, (f) => onProgress?.("Saving cards", 0.5 + f * 0.3));
     onProgress?.("Saving reviews", 0.8);
     await db.putMany("reviews", addedReviews, 5000, (f) => onProgress?.("Saving reviews", 0.8 + f * 0.2));
     await db.setMeta("lastImport", { at: Date.now(), summary: res.summary });
@@ -207,6 +226,54 @@ export class Store {
     await db.putMany("notetypes", r.notetypes); await db.putMany("notes", r.notes); await db.putMany("cards", r.cards); if (blobs.length) await db.putMany("media", blobs);
     this.bump(); this.touch();
     return describePack(r);
+  }
+
+  /** Apply a curation file made by Claude: deck moves, note merges (keep one note, drop the copies, union tags) and tag additions. */
+  async importCuration(json: unknown, onProgress?: (msg: string, frac: number) => void): Promise<string> {
+    const c = json as { yuzu_curation: 1; name?: string; decks?: Record<string, string | null>; merges?: { keep: string; drop: string[]; tags?: string[] }[]; review?: string[][]; tags?: Record<string, string[]> };
+    if (!c || c.yuzu_curation !== 1) throw new Error("Not a Yuzu curation file");
+    const now = Date.now();
+    const changedNotes = new Map<string, Note>(); const changedCards = new Map<string, Card>();
+    const delNotes: string[] = []; const delCards: string[] = [];
+    const touchNote = (id: string, f: (n: Note) => void) => { const n = changedNotes.get(id) ?? this.notes.get(id); if (!n) return; const m = { ...n, tags: [...n.tags] }; f(m); m.modified = now; changedNotes.set(id, m); this.notes.set(id, m); };
+    // 1. merges
+    onProgress?.("Merging duplicates", 0.1);
+    let merged = 0, moved = 0, tagged = 0, dropped = 0;
+    const log: { keep: string; dropped: Note[]; cards: Card[] }[] = [];
+    const byNid = new Map<string, Card[]>(); for (const card of this.cards.values()) (byNid.get(card.nid) ?? byNid.set(card.nid, []).get(card.nid)!).push(card);
+    for (const m of c.merges ?? []) {
+      if (!this.notes.has(m.keep)) continue;
+      const entry = { keep: m.keep, dropped: [] as Note[], cards: [] as Card[] };
+      for (const d of m.drop) {
+        const n = this.notes.get(d); if (!n || d === m.keep) continue;
+        entry.dropped.push(n); delNotes.push(d); this.notes.delete(d);
+        for (const card of byNid.get(d) ?? []) { entry.cards.push(card); delCards.push(card.id); this.cards.delete(card.id); }
+        this.tombstones["n:" + d] = now; dropped++;
+      }
+      if (entry.dropped.length) { log.push(entry); merged++; }
+      if (m.tags?.length) touchNote(m.keep, (n) => { for (const t of m.tags!) if (!n.tags.includes(t)) n.tags.push(t); });
+    }
+    // 2. deck moves (exact deck path → new path; null = drop the deck)
+    onProgress?.("Moving decks", 0.4);
+    const decks = c.decks ?? {};
+    for (const card of [...this.cards.values()]) {
+      if (!(card.source in decks)) continue;
+      const to = decks[card.source];
+      if (to === null) { delCards.push(card.id); this.cards.delete(card.id); this.tombstones["c:" + card.id] = now; const sibs = byNid.get(card.nid) ?? []; if (sibs.every((x) => !this.cards.has(x.id)) && this.notes.has(card.nid)) { delNotes.push(card.nid); this.notes.delete(card.nid); this.tombstones["n:" + card.nid] = now; } dropped++; continue; }
+      if (to === card.source) continue;
+      const m = { ...card, source: to, mod: now }; this.cards.set(card.id, m); changedCards.set(card.id, m); moved++;
+    }
+    // 3. tags
+    onProgress?.("Tagging", 0.7);
+    for (const [tag, ids] of Object.entries(c.tags ?? {})) for (const id of ids) { const n = this.notes.get(id); if (n && !n.tags.includes(tag)) { touchNote(id, (x) => x.tags.push(tag)); tagged++; } }
+    for (const g of c.review ?? []) for (const id of g) { const n = this.notes.get(id); if (n && !n.tags.includes("needs-review::similar")) touchNote(id, (x) => x.tags.push("needs-review::similar")); }
+    onProgress?.("Saving", 0.85);
+    await db.putMany("notes", [...changedNotes.values()]); await db.putMany("cards", [...changedCards.values()]);
+    if (delNotes.length) await db.deleteMany("notes", delNotes); if (delCards.length) await db.deleteMany("cards", delCards);
+    await db.setMeta("tombstones", this.tombstones);
+    const prev = await db.getMeta<unknown[]>("mergeLog", []); await db.setMeta("mergeLog", [...prev, { at: now, name: c.name ?? "", merges: log }]);
+    this.bump(); this.touch();
+    return `${merged} duplicate groups merged (${dropped} notes removed), ${moved.toLocaleString()} cards moved to new categories, ${tagged.toLocaleString()} tags added${c.review?.length ? `, ${c.review.length} similar pairs tagged needs-review::similar` : ""}.`;
   }
 
   async wipe() {
@@ -383,15 +450,20 @@ export class Store {
   /** Full backup as a plain object (token excluded). */
   backup() {
     const { sync, ...settings } = this.settings;
-    return { app: "yuzu", version: 1, at: Date.now(), settings: { ...settings, sync: { ...sync, token: "" } }, notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews };
+    return { app: "yuzu", version: 1, at: Date.now(), settings: { ...settings, sync: { ...sync, token: "" } }, notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones };
   }
   async restore(data: any, onProgress?: (m: string, f: number) => void) {
     if (data?.app !== "yuzu") throw new Error("Not a Yuzu backup file");
     for (const nt of data.notetypes ?? []) this.notetypes.set(nt.id, nt);
-    const n = mergeNotes(this.notes, data.notes ?? []); const c = mergeCards(this.cards, data.cards ?? []);
+    if (data.tombstones) { this.tombstones = mergeTombstones(this.tombstones, data.tombstones); await db.setMeta("tombstones", this.tombstones); }
+    const n = mergeNotes(this.notes, data.notes ?? [], this.tombstones); const c = mergeCards(this.cards, data.cards ?? [], this.tombstones);
+    const known = new Set(this.reviews.map((r) => r.id));
     const m = mergeReviews(this.reviews, data.reviews ?? []); this.reviews = m.list;
     onProgress?.("Saving", 0.3);
-    await db.putMany("notetypes", data.notetypes ?? []); await db.putMany("notes", data.notes ?? [], 1000); await db.putMany("cards", data.cards ?? [], 2000); await db.putMany("reviews", data.reviews ?? [], 5000);
+    await db.putMany("notetypes", data.notetypes ?? []);
+    await db.putMany("notes", (data.notes ?? []).filter((x: Note) => this.notes.get(x.id) === x), 1000);
+    await db.putMany("cards", (data.cards ?? []).filter((x: Card) => this.cards.get(x.id) === x), 2000);
+    await db.putMany("reviews", (data.reviews ?? []).filter((r: Review) => !known.has(r.id)), 5000);
     if (data.settings) { const { sync, ...rest } = data.settings; this.settings = { ...this.settings, ...rest, sync: { ...this.settings.sync, ...(sync ?? {}), token: this.settings.sync.token || sync?.token || "" } }; await db.setMeta("settings", this.settings); }
     this.bump(); this.touch();
     return { notes: n, cards: c, reviews: m.added };

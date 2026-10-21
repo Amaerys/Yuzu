@@ -8,6 +8,8 @@ export interface Manifest { version: 1; files: Record<string, string>; updatedAt
 
 export interface SyncSnapshot {
   notetypes: Notetype[]; notes: Note[]; cards: Card[]; reviews: Review[]; settings: Record<string, unknown>;
+  /** Deleted records: "n:<noteId>" / "c:<cardId>" → time of deletion. A tombstone beats any record modified before it. */
+  tombstones?: Record<string, number>;
 }
 export interface SyncResult { pulled: { notes: number; cards: number; reviews: number }; pushed: number; commit?: string }
 
@@ -67,6 +69,7 @@ export class GitHubSync {
     const files: Record<string, string> = {};
     files["notetypes.json"] = JSON.stringify(snap.notetypes);
     files["settings.json"] = JSON.stringify(snap.settings);
+    if (snap.tombstones && Object.keys(snap.tombstones).length) files["tombstones.json"] = JSON.stringify(snap.tombstones);
     const notes: Note[][] = Array.from({ length: SHARDS }, () => []);
     for (const n of snap.notes) notes[shardOf(n.id)].push(n);
     notes.forEach((list, i) => { files[`notes/${i}.json`] = JSON.stringify(list.sort((a, b) => a.id < b.id ? -1 : 1)); });
@@ -90,6 +93,7 @@ export class GitHubSync {
       const data = JSON.parse(t);
       if (p === "notetypes.json") out.notetypes = data;
       else if (p === "settings.json") out.settings = data;
+      else if (p === "tombstones.json") out.tombstones = data;
       else if (p.startsWith("notes/")) out.notes = (out.notes ?? []).concat(data);
       else if (p.startsWith("cards/")) out.cards = (out.cards ?? []).concat(data);
       else if (p.startsWith("reviews/")) out.reviews = (out.reviews ?? []).concat(data);
@@ -124,15 +128,20 @@ export class GitHubSync {
   }
 }
 
+/** Union of tombstones (later deletion time wins). */
+export function mergeTombstones(local: Record<string, number>, remote: Record<string, number>): Record<string, number> {
+  const out = { ...local }; for (const [k, t] of Object.entries(remote)) if ((out[k] ?? -1) < t) out[k] = t; return out;
+}
 /** Merge remote records into local maps. Returns counts of records that changed locally. */
-export function mergeNotes(local: Map<string, Note>, remote: Note[]): number {
+export function mergeNotes(local: Map<string, Note>, remote: Note[], tombs: Record<string, number> = {}): number {
   let n = 0;
-  for (const r of remote) { const l = local.get(r.id); if (!l || r.modified > l.modified) { local.set(r.id, r); n++; } }
+  for (const r of remote) { if ((tombs["n:" + r.id] ?? -1) >= r.modified) continue; const l = local.get(r.id); if (!l || r.modified > l.modified) { local.set(r.id, r); n++; } }
   return n;
 }
-export function mergeCards(local: Map<string, Card>, remote: Card[]): number {
+export function mergeCards(local: Map<string, Card>, remote: Card[], tombs: Record<string, number> = {}): number {
   let n = 0;
   for (const r of remote) {
+    if ((tombs["c:" + r.id] ?? -1) >= (r.mod ?? r.lastReview) || (tombs["n:" + r.nid] ?? -1) >= (r.mod ?? r.lastReview)) continue;
     const l = local.get(r.id);
     const rm = (r as any).mod ?? r.lastReview, lm = (l as any)?.mod ?? l?.lastReview ?? -1;
     if (!l || rm > lm) { local.set(r.id, r); n++; }

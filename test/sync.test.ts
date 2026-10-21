@@ -88,3 +88,13 @@ test("two devices converge through push/pull with last-change-wins", async () =>
     assert.equal(r4.pushed, 0);
   } finally { globalThis.fetch = origFetch; }
 });
+
+test("tombstones: a deleted note does not come back from remote, later edits do", async () => {
+  const { mergeNotes, mergeCards, mergeTombstones } = await import("../src/lib/sync.ts");
+  const local = new Map<string, any>(); const tombs = { "n:a": 1000, "c:x": 1000 };
+  assert.equal(mergeNotes(local, [{ id: "a", modified: 900 } as any], tombs), 0);
+  assert.equal(mergeNotes(local, [{ id: "a", modified: 1001 } as any], tombs), 1, "an edit after the deletion wins");
+  const cards = new Map<string, any>();
+  assert.equal(mergeCards(cards, [{ id: "x", nid: "b", mod: 500 } as any, { id: "y", nid: "a", mod: 500 } as any], tombs), 0, "card tombstone and note tombstone both apply");
+  assert.deepEqual(mergeTombstones({ "n:a": 5 }, { "n:a": 3, "n:b": 9 }), { "n:a": 5, "n:b": 9 });
+});

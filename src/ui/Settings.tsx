@@ -30,8 +30,9 @@ export function Settings() {
     try {
       setMsg("Reading file");
       if (/\.json$/i.test(file.name)) {
-        const text = await file.text();
-        setResult(await store.importPack(JSON.parse(text)));
+        const text = await file.text(); const json = JSON.parse(text);
+        if (json?.yuzu_curation === 1) { setMsg("Applying curation"); setResult(await store.importCuration(json, (m, f) => { setMsg(m); setFrac(f); })); return; }
+        setResult(await store.importPack(json));
         return;
       }
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -51,7 +52,7 @@ export function Settings() {
       <h1>Settings</h1>
       <h2>Import from Anki</h2>
       <div className="card-box">
-        <p className="small muted" style={{ marginTop: 0 }}>Export from Anki as a <b>collection package (.colpkg)</b> or a deck (.apkg) <b>without media</b>, with scheduling included. Importing again later only adds what's new. Also accepts <b>Yuzu card packs</b> (.json) made by Claude: duplicates are skipped and similar cards get the tag <i>needs-review::similar</i>.</p>
+        <p className="small muted" style={{ marginTop: 0 }}>Export from Anki as a <b>collection package (.colpkg)</b> or a deck (.apkg) <b>without media</b>, with scheduling included. Importing again later only adds what's new. Also accepts <b>Yuzu card packs</b> and <b>curation files</b> (.json) made by Claude: duplicates are skipped or merged, cards move to their categories, similar cards get the tag <i>needs-review::similar</i>. Large collections: import on a PC first, then sync to the phone.</p>
         <label className="row small" style={{ marginBottom: 10 }}><input type="checkbox" checked={skipLanguages} onChange={(e) => setSkipLanguages(e.target.checked)} /> Skip the Languages decks</label>
         <input ref={fileRef} type="file" accept=".colpkg,.apkg,.zip,.json" style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
         <button className="btn primary block" disabled={busy} onClick={() => fileRef.current?.click()}>{busy ? "Importing…" : "Choose file"}</button>
