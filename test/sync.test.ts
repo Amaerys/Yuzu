@@ -25,6 +25,8 @@ function fakeGitHub() {
     }
     if (p === "/git/ref/heads/main") return head ? json({ object: { sha: head } }) : new Response(JSON.stringify({ message: "Git Repository is empty." }), { status: 409 });
     if (p.startsWith("/git/commits/") && m === "GET") return json({ tree: { sha: commits.get(p.slice(13))!.tree } });
+    if (p === "/contents/.yuzu" && m === "PUT") { const b = sha(); blobs.set(b, dec(body.content)); const t = sha(); trees.set(t, { ".yuzu": b }); const c = sha(); commits.set(c, { tree: t, parents: [] }); head = c; return json({ commit: { sha: c } }); }
+    if (!head && p.startsWith("/git/")) return new Response(JSON.stringify({ message: "Git Repository is empty." }), { status: 409 });
     if (p === "/git/blobs" && m === "POST") { const s = sha(); blobs.set(s, dec(body.content)); return json({ sha: s }); }
     if (p === "/git/trees" && m === "POST") {
       const base = body.base_tree ? { ...trees.get(body.base_tree)! } : {};

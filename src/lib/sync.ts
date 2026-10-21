@@ -38,7 +38,7 @@ export class GitHubSync {
   }
   private async api(path: string, init: RequestInit = {}): Promise<any> {
     const res = await fetch(this.base + path, { ...init, headers: this.headers({ ...(init.headers as any), ...(init.body ? { "Content-Type": "application/json" } : {}) }) });
-    if (res.status === 404 || res.status === 409) return null; // 409 = "Git Repository is empty" (brand-new repo, no commits yet)
+    if (res.status === 404 || (res.status === 409 && !init.method)) return null; // GET on a missing path or an empty repo // 409 = "Git Repository is empty" (brand-new repo, no commits yet)
     if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
     return res.json();
   }
@@ -109,7 +109,14 @@ export class GitHubSync {
     const toDelete = remote ? Object.keys(remote.files).filter((p) => !(p in files)) : [];
     const manifest: Manifest = { version: 1, files: hashes, updatedAt: Date.now(), device };
     if (!toWrite.length && !toDelete.length) return { manifest: remote ?? manifest, commit: null, pushed: 0 };
-    const ref = await this.api(`/git/ref/heads/${this.branch}`);
+    let ref = await this.api(`/git/ref/heads/${this.branch}`);
+    if (!ref) {
+      // Empty repository: the Git Data API cannot create blobs/trees until a first commit exists.
+      // Make one with the Contents API, then continue normally.
+      await this.api(`/contents/.yuzu`, { method: "PUT", body: JSON.stringify({ message: "Yuzu sync data", content: utf8ToBase64("Yuzu sync data. Do not edit by hand.\n"), branch: this.branch }) });
+      ref = await this.api(`/git/ref/heads/${this.branch}`);
+      if (!ref) throw new Error("Could not create the first commit in the repository");
+    }
     const baseCommit = ref?.object?.sha ?? null;
     const baseTree = baseCommit ? (await this.api(`/git/commits/${baseCommit}`)).tree.sha : null;
     const tree: any[] = [];
