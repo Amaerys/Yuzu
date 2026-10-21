@@ -6,6 +6,7 @@ import { fit as fitWeights, calibration as calib } from "../scheduler/optimize";
 import type { ImportResult } from "../import/anki";
 import { parsePack, describePack } from "../import/pack";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
+import { importMedia, type MediaEnv } from "../import/media";
 import { GitHubSync, SyncError, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
 export interface Settings {
@@ -122,11 +123,12 @@ export class Store {
           if (got.settings && (got.settings as any).updatedAt > ((this.settings as any).updatedAt ?? 0)) {
             const { sync: _s, ...rest } = got.settings as any; this.settings = { ...this.settings, ...rest }; await db.setMeta("settings", this.settings);
           }
+          if (got.media) { const blobs: { name: string; blob: Blob }[] = []; for (const [name, url] of Object.entries(got.media as Record<string, string>)) { if (this.media.has(name)) continue; const blob = await (await fetch(url)).blob(); this.media.set(name, blob); blobs.push({ name, blob }); } if (blobs.length) { await db.putMany("media", blobs); this.mediaUrls.clear(); } }
           if (pulledN + pulledC + pulledR) this.treeCache.clear();
         }
         progress("Preparing upload");
         const { files, hashes } = await GitHubSync.shard({
-          notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones,
+          notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(),
           settings: { ...this.settings, sync: undefined, updatedAt: (this.settings as any).updatedAt ?? 0 },
         }, this.shardCache);
         try {
@@ -363,6 +365,40 @@ export class Store {
     const prev = await db.getMeta<unknown[]>("mergeLog", []); await db.setMeta("mergeLog", [...prev, { at: now, name: c.name ?? "", merges: log }]);
     this.bump(); this.touch();
     return `${merged} duplicate groups merged (${dropped} notes removed), ${moved.toLocaleString()} cards moved to new categories, ${tagged.toLocaleString()} tags added${c.review?.length ? `, ${c.review.length} similar pairs tagged needs-review::similar` : ""}.`;
+  }
+
+  // ---- media ---------------------------------------------------------------
+  /** Images referenced by notes but not stored on this device, per top-level deck. */
+  mediaStatus(): { total: number; stored: number; bytes: number } {
+    let bytes = 0; for (const b of this.media.values()) bytes += b.size;
+    const refs = new Set<string>();
+    for (const n of this.notes.values()) for (const f of n.fields) for (const m of f.matchAll(/<img[^>]+src=["']([^"']+)["']/gi)) { let x = m[1]; try { x = decodeURIComponent(x); } catch { /* keep */ } if (!/^(https?:|data:|blob:)/i.test(x)) refs.add(x); }
+    let stored = 0; for (const r of refs) if (this.media.has(r)) stored++;
+    return { total: refs.size, stored, bytes };
+  }
+  async addMediaFrom(file: Blob, env: MediaEnv) {
+    const batch: { name: string; blob: Blob }[] = [];
+    const flush = async () => { if (!batch.length) return; await db.putMany("media", batch.splice(0)); };
+    const r = await importMedia(file, this.notes.values(), (n) => this.media.has(n), async (name, blob) => { this.media.set(name, blob); batch.push({ name, blob }); if (batch.length >= 50) await flush(); }, env);
+    await flush(); this.mediaUrls.clear(); this.bump();
+    return r;
+  }
+  async clearMedia(keepPacks = true) {
+    const del: string[] = []; for (const name of this.media.keys()) if (!(keepPacks && name.startsWith("pack-"))) { del.push(name); this.media.delete(name); }
+    await db.deleteMany("media", del); this.mediaUrls.clear(); this.bump(); return del.length;
+  }
+  /** Small images from packs, as data URLs, for sync (cached per name). */
+  private packMediaCache = new Map<string, string>();
+  async packMedia(): Promise<Record<string, string>> {
+    const out: Record<string, string> = {}; let total = 0;
+    for (const [name, blob] of this.media) {
+      if (!name.startsWith("pack-")) continue;
+      let u = this.packMediaCache.get(name);
+      if (!u) { u = await new Promise<string>((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result as string); fr.onerror = () => rej(fr.error); fr.readAsDataURL(blob); }); this.packMediaCache.set(name, u); }
+      total += u.length; if (total > 25 * 1048576) break;
+      out[name] = u;
+    }
+    return out;
   }
 
   // ---- duplicates --------------------------------------------------------

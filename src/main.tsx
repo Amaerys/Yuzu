@@ -4,6 +4,7 @@ import { store } from "./lib/store";
 
 store.load().catch(() => { /* shown by the recovery screen */ });
 createRoot(document.getElementById("root")!).render(<App />);
+(window as any).yuzu = store; // for debugging from the console
 
 // Last-resort reporting: anything uncaught is remembered for Settings → Diagnostics.
 const remember = (where: string, e: unknown) => {

@@ -17,6 +17,8 @@ export interface SyncSnapshot {
   notetypes: Notetype[]; notes: Note[]; cards: Card[]; reviews: Review[]; settings: Record<string, unknown>;
   /** Deleted records: "n:<noteId>" / "c:<cardId>" → time of deletion. A tombstone beats any record modified before it. */
   tombstones?: Record<string, number>;
+  /** Small pack images as data URLs (name → data URL). Deck media is per device and never synced. */
+  media?: Record<string, string>;
 }
 export interface SyncResult { pulled: { notes: number; cards: number; reviews: number }; pushed: number; commit?: string }
 export type Progress = (message: string) => void;
@@ -127,6 +129,8 @@ export class GitHubSync {
     };
     await emit("notetypes.json", "v" + snap.notetypes.length + ":" + snap.notetypes.map((n) => n.id).join(","), () => JSON.stringify(snap.notetypes));
     await emit("settings.json", JSON.stringify(snap.settings), () => JSON.stringify(snap.settings));
+    const media = snap.media ?? {};
+    if (Object.keys(media).length) await emit("media.json", "m" + Object.keys(media).sort().join(","), () => JSON.stringify(media));
     const tombs = snap.tombstones ?? {};
     if (Object.keys(tombs).length) await emit("tombstones.json", "t" + Object.keys(tombs).length + ":" + Object.values(tombs).reduce((a, b) => a + b, 0), () => JSON.stringify(tombs));
     const notes: Note[][] = Array.from({ length: NOTE_SHARDS }, () => []);
@@ -174,6 +178,7 @@ export class GitHubSync {
       if (p === "notetypes.json") out.notetypes = data;
       else if (p === "settings.json") out.settings = data;
       else if (p === "tombstones.json") out.tombstones = data;
+      else if (p === "media.json") out.media = data;
       else if (p.startsWith("notes/")) out.notes = (out.notes ?? []).concat(data);
       else if (p.startsWith("cards/")) out.cards = (out.cards ?? []).concat(data);
       else if (p.startsWith("reviews/")) out.reviews = (out.reviews ?? []).concat(data);

@@ -13,6 +13,16 @@ declare const __VERSION__: string;
 export function Settings() {
   const fileRef = useRef<HTMLInputElement>(null);
   const restoreRef = useRef<HTMLInputElement>(null);
+  const mediaRef = useRef<HTMLInputElement>(null);
+  const [mediaMsg, setMediaMsg] = useState("");
+  async function onMedia(file: File) {
+    setBusy(true); setMediaMsg(""); setFrac(0);
+    try {
+      const r = await store.addMediaFrom(file, { inflateRaw, zstd, onProgress: (m, f) => { setMediaMsg(m); if (f !== undefined) setFrac(f); } });
+      setMediaMsg(`${r.stored.toLocaleString()} images added (${(r.bytes / 1048576).toFixed(0)} MB)${r.missing ? `, ${r.missing.toLocaleString()} referenced images are not in this file` : ""}.`);
+    } catch (e: any) { setMediaMsg("Failed: " + (e?.message ?? e)); }
+    finally { setBusy(false); if (mediaRef.current) mediaRef.current.value = ""; }
+  }
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [frac, setFrac] = useState(0);
@@ -69,6 +79,17 @@ export function Settings() {
         {busy && (<><div className="bar"><i style={{ width: `${frac * 100}%` }} /></div><div className="small muted">{msg} — keep this tab open</div></>)}
         {result && <p className="small" style={{ marginBottom: 0 }}>{result}</p>}
         {last && !busy && <p className="small muted" style={{ marginBottom: 0 }}>Last import {new Date(last.at).toLocaleString()}: {last.summary?.cards?.toLocaleString()} cards.</p>}
+      </div>
+
+      <h2>Images</h2>
+      <div className="card-box">
+        {(() => { const m = store.mediaStatus(); return <p className="small muted" style={{ marginTop: 0 }}>{m.stored.toLocaleString()} of {m.total.toLocaleString()} images your cards use are on this device ({(m.bytes / 1048576).toFixed(0)} MB). Images stay on each device; to add some, export a deck from Anki as .apkg <b>with media</b> and choose it here. Only the images your cards reference are kept, shrunk to fit a phone screen.</p>; })()}
+        <input ref={mediaRef} type="file" accept=".apkg,.colpkg,.zip" style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && onMedia(e.target.files[0])} />
+        <div className="row">
+          <button className="btn primary grow" disabled={busy} onClick={() => mediaRef.current?.click()}>{busy ? "Working…" : "Add images from a deck file"}</button>
+          <button className="btn" disabled={busy} onClick={async () => { if (confirm("Remove all deck images from this device? Cards keep working, images show as placeholders until added again.")) setResult(`Removed ${await store.clearMedia()} images.`); }}>Remove</button>
+        </div>
+        {mediaMsg && <p className="small" style={{ marginBottom: 0 }}>{mediaMsg}</p>}
       </div>
 
       <h2>Sync between devices</h2>
