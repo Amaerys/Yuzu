@@ -55,6 +55,18 @@ try {
   await page.click("text=Select"); await page.click(".chip >> text=All"); await page.click(".bulk-bar >> text=Unsuspend"); await page.waitForTimeout(400);
   await page.locator(".list-row").first().click(); await page.waitForSelector("text=Preview"); await page.screenshot({ path: `${shots}/04d-preview.png` });
   await page.click('[aria-label="Close preview"]');
+  // Card pack import with an image, then study it
+  await page.click("nav.tabs >> text=Settings");
+  await page.setInputFiles('input[type=file] >> nth=0', "test/fixtures/hyperkalemia.yuzu.json");
+  await page.waitForFunction(() => document.body.innerText.includes("cards added"), null, { timeout: 30000 });
+  console.log("pack:", await page.locator("text=/cards added/").first().innerText());
+  await page.click("nav.tabs >> text=Library"); await page.click(".seg >> text=Decks");
+  await page.fill("input[placeholder^=Search]", "tented"); await page.waitForTimeout(300);
+  await page.locator(".list-row").first().click(); await page.waitForSelector("text=Preview");
+  const imgOk = await page.locator(".sheet .card-host").evaluate((el) => { const img = el.shadowRoot!.querySelector("img") as HTMLImageElement | null; return img ? img.src.startsWith("blob:") : false; });
+  console.log("pack image renders:", imgOk);
+  await page.screenshot({ path: `${shots}/09-pack-preview.png` });
+  await page.click('[aria-label="Close preview"]');
   // Backup download
   await page.click("nav.tabs >> text=Settings");
   const [dl] = await Promise.all([page.waitForEvent("download"), page.click("text=Back up")]);

@@ -16,7 +16,7 @@ function findNode(root: TreeNode, path: string): TreeNode | null {
 
 function Preview({ card, onClose }: { card: Card; onClose: () => void }) {
   const note = store.noteFor(card)!; const nt = store.notetypeFor(note)!;
-  const r = renderCard({ note, notetype: nt, ord: card.ord, deck: card.source, resolveMedia: () => null });
+  const r = renderCard({ note, notetype: nt, ord: card.ord, deck: card.source, resolveMedia: store.mediaUrl });
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => { const h = ref.current!; const root = h.shadowRoot ?? h.attachShadow({ mode: "open" }); root.innerHTML = `<style>.card{font-size:17px;line-height:1.4;color:#f2f2f0} img{max-width:100%} .cloze{color:#ff7a1a;font-weight:700} hr#answer{border:0;border-top:1px solid #333;margin:10px 0}</style><style>${r.css}</style><div class="night_mode nightMode"><div class="card night_mode">${r.back}</div></div>`; }, [card.id]);
   return (

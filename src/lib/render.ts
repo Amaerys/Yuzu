@@ -39,7 +39,9 @@ function renderTemplate(tmpl: string, ctx: RenderCtx, side: "q" | "a", frontHtml
   const hasCloze = (name: string) => ctx.notetype.kind === "cloze" && new RegExp(`\\{\\{c${ctx.ord + 1}::`).test(fields[name] ?? "");
   const nonEmpty = (name: string) => {
     if (/^c\d+$/.test(name)) return ctx.notetype.kind === "cloze" && Number(name.slice(1)) === ctx.ord + 1;
-    return stripHtml(fields[name] ?? "").trim().length > 0;
+    const raw = fields[name] ?? "";
+    if (/<img|\[sound:|<audio|<video/i.test(raw)) return true;
+    return stripHtml(raw.replace(/<br\s*\/?>/gi, "")).trim().length > 0;
   };
   // Conditionals (innermost first, repeat until stable).
   let out = tmpl;

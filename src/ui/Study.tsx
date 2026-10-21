@@ -126,7 +126,7 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
 
   const note = card && store.noteFor(card);
   const nt = note && store.notetypeFor(note);
-  const rendered = useMemo(() => (card && note && nt ? renderCard({ note, notetype: nt, ord: card.ord, deck: card.source, resolveMedia: () => null }) : null), [card?.id, rev]);
+  const rendered = useMemo(() => (card && note && nt ? renderCard({ note, notetype: nt, ord: card.ord, deck: card.source, resolveMedia: store.mediaUrl }) : null), [card?.id, rev]);
   const intervals = useMemo(() => (card ? previewIntervals(card, Date.now(), store.settings.scheduler) : null), [card?.id, rev]);
 
   async function answer(g: Rating) {

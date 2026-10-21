@@ -3,6 +3,7 @@ import type { Card, CardState, Note, Notetype, Rating, Review } from "./model";
 import * as db from "./db";
 import { rate, DEFAULT_CONFIG, type SchedulerConfig, DAY } from "../scheduler/fsrs";
 import type { ImportResult } from "../import/anki";
+import { parsePack, describePack } from "../import/pack";
 import { GitHubSync, mergeCards, mergeNotes, mergeReviews, type Manifest, type SyncConfig } from "./sync";
 
 export interface Settings {
@@ -45,6 +46,8 @@ export class Store {
   notes = new Map<string, Note>();
   cards = new Map<string, Card>();
   reviews: Review[] = [];
+  media = new Map<string, Blob>();
+  private mediaUrls = new Map<string, string>();
   settings: Settings = { ...DEFAULT_SETTINGS };
   loaded = false;
   syncStatus: SyncStatus = { state: "off", message: "Not set up", at: 0 };
@@ -129,6 +132,7 @@ export class Store {
     this.notes = new Map(snap.notes.map((n) => [n.id, n]));
     this.cards = new Map(snap.cards.map((c) => [c.id, c]));
     this.reviews = snap.reviews.sort((a, b) => a.ts - b.ts);
+    for (const m of await db.getAll<{ name: string; blob: Blob }>("media")) this.media.set(m.name, m.blob);
     const saved = await db.getMeta<Partial<Settings>>("settings", {});
     this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) } };
     this.loaded = true;
@@ -179,9 +183,27 @@ export class Store {
     return { newNotes, newCards, updated, reviews: addedReviews.length };
   }
 
+  mediaUrl = (name: string): string | null => {
+    const hit = this.mediaUrls.get(name); if (hit) return hit;
+    const b = this.media.get(name); if (!b) return null;
+    const u = URL.createObjectURL(b); this.mediaUrls.set(name, u); return u;
+  };
+
+  async importPack(json: unknown): Promise<string> {
+    const r = parsePack(json, this.notes.values());
+    for (const nt of r.notetypes) this.notetypes.set(nt.id, nt);
+    for (const n of r.notes) this.notes.set(n.id, n);
+    for (const c of r.cards) this.cards.set(c.id, c);
+    const blobs: { name: string; blob: Blob }[] = [];
+    for (const m of r.media) { const res = await fetch(m.dataUrl); const blob = await res.blob(); this.media.set(m.name, blob); blobs.push({ name: m.name, blob }); }
+    await db.putMany("notetypes", r.notetypes); await db.putMany("notes", r.notes); await db.putMany("cards", r.cards); if (blobs.length) await db.putMany("media", blobs);
+    this.bump(); this.touch();
+    return describePack(r);
+  }
+
   async wipe() {
     await db.clearAll();
-    this.notetypes.clear(); this.notes.clear(); this.cards.clear(); this.reviews = [];
+    this.notetypes.clear(); this.notes.clear(); this.cards.clear(); this.reviews = []; this.media.clear();
     this.bump();
   }
 

@@ -29,6 +29,11 @@ export function Settings() {
     setBusy(true); setResult(""); setFrac(0);
     try {
       setMsg("Reading file");
+      if (/\.json$/i.test(file.name)) {
+        const text = await file.text();
+        setResult(await store.importPack(JSON.parse(text)));
+        return;
+      }
       const bytes = new Uint8Array(await file.arrayBuffer());
       const res = await importAnki(bytes, {
         inflateRaw, zstd,
@@ -46,9 +51,9 @@ export function Settings() {
       <h1>Settings</h1>
       <h2>Import from Anki</h2>
       <div className="card-box">
-        <p className="small muted" style={{ marginTop: 0 }}>Export from Anki as a <b>collection package (.colpkg)</b> or a deck (.apkg) <b>without media</b>, with scheduling included. Importing again later only adds what's new.</p>
+        <p className="small muted" style={{ marginTop: 0 }}>Export from Anki as a <b>collection package (.colpkg)</b> or a deck (.apkg) <b>without media</b>, with scheduling included. Importing again later only adds what's new. Also accepts <b>Yuzu card packs</b> (.json) made by Claude: duplicates are skipped and similar cards get the tag <i>needs-review::similar</i>.</p>
         <label className="row small" style={{ marginBottom: 10 }}><input type="checkbox" checked={skipLanguages} onChange={(e) => setSkipLanguages(e.target.checked)} /> Skip the Languages decks</label>
-        <input ref={fileRef} type="file" accept=".colpkg,.apkg,.zip" style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
+        <input ref={fileRef} type="file" accept=".colpkg,.apkg,.zip,.json" style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
         <button className="btn primary block" disabled={busy} onClick={() => fileRef.current?.click()}>{busy ? "Importing…" : "Choose file"}</button>
         {busy && (<><div className="bar"><i style={{ width: `${frac * 100}%` }} /></div><div className="small muted">{msg}</div></>)}
         {result && <p className="small" style={{ marginBottom: 0 }}>{result}</p>}
