@@ -97,6 +97,8 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
   const shownAt = useRef(Date.now());
   const touch = useRef<{ x: number; y: number; t: number } | null>(null);
   const [drag, setDrag] = useState(0);
+  const [typed, setTyped] = useState("");
+  const [leech, setLeech] = useState<{ cardId: string; lapses: number } | null>(null);
   const total = queue.length;
   const card = queue[idx];
   const dark = store.settings.nightCards;
@@ -109,11 +111,12 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
     }
   }, [idx, queue, path, view, plan]);
 
-  useEffect(() => { shownAt.current = Date.now(); setShowAnswer(false); setInfo(false); }, [card?.id]);
+  useEffect(() => { shownAt.current = Date.now(); setShowAnswer(false); setInfo(false); setTyped(""); }, [card?.id]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!card || info) return;
+      if (!card || info || leech) return;
+      if ((e.target as HTMLElement)?.tagName === "INPUT") { if (e.key === "Enter") { e.preventDefault(); setShowAnswer(true); (e.target as HTMLInputElement).blur(); } return; }
       if (e.key === " " || e.key === "Enter") { e.preventDefault(); if (!showAnswer) setShowAnswer(true); else answer(3); }
       if (showAnswer && ["1", "2", "3", "4"].includes(e.key)) answer(Number(e.key) as Rating);
       if (e.key === "i") setInfo(true);
@@ -128,11 +131,23 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
   const nt = note && store.notetypeFor(note);
   const rendered = useMemo(() => (card && note && nt ? renderCard({ note, notetype: nt, ord: card.ord, deck: card.source, resolveMedia: store.mediaUrl }) : null), [card?.id, rev]);
   const intervals = useMemo(() => (card ? previewIntervals(card, Date.now(), store.settings.scheduler) : null), [card?.id, rev]);
+  // Typed answers for language cards: the answer is whatever the back shows that the front did not.
+  const typing = !!card && store.settings.typeAnswers && card.source.startsWith("Languages") && !!nt && nt.kind === "standard";
+  const answerText = useMemo(() => {
+    if (!typing || !nt || !note) return "";
+    const t = nt.templates[Math.min(card!.ord, nt.templates.length - 1)]; const used = (fmt: string) => [...fmt.matchAll(/\{\{([^#/^}][^}]*)\}\}/g)].map((m) => m[1].split(":").pop()!.trim());
+    const front = new Set(used(t.qfmt)); const back = used(t.afmt).filter((f) => !front.has(f) && f !== "FrontSide");
+    const idx = back.map((f) => nt.fields.indexOf(f)).filter((i) => i >= 0);
+    return idx.map((i) => note.fields[i]).join(" ").replace(/\[sound:[^\]]+\]/g, "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+  }, [card?.id, typing]);
+  const norm = (x: string) => x.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const typedOk = typed && answerText ? norm(typed) === norm(answerText) || norm(answerText).split(/[;,/]|\s-\s/).map((x) => x.trim()).includes(norm(typed)) : null;
 
   async function answer(g: Rating) {
     if (!card) return;
     await store.answer(card.id, g, Date.now() - shownAt.current);
     setDoneCount((d) => d + 1);
+    if (store.lastAnswer?.leech && store.lastAnswer.cardId === card.id) setLeech({ cardId: card.id, lapses: store.lastAnswer.lapses });
     setIdx((i) => i + 1);
     if (navigator.vibrate) navigator.vibrate(g === 1 ? [30, 40, 30] : 12);
   }
@@ -213,6 +228,8 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
         {drag < -40 && <div className="swipe-hint again">Again</div>}
         {drag > 40 && <div className="swipe-hint good">Good</div>}
         {rendered && <CardView html={showAnswer ? rendered.back : rendered.front} css={rendered.css} dark={dark} />}
+        {typing && !showAnswer && <div style={{ padding: "0 14px 12px" }} onClick={(e) => e.stopPropagation()}><input className="typeans" autoFocus={false} placeholder="Type the answer, then Enter" value={typed} onChange={(e) => setTyped(e.target.value)} autoCapitalize="none" autoCorrect="off" /></div>}
+        {typing && showAnswer && typed && <div style={{ padding: "0 14px 12px" }}><span className={"chip " + (typedOk ? "yuzu" : "")} style={typedOk ? {} : { color: "var(--again)" }}>{typedOk ? "✓ " : "✗ "}{typed}{!typedOk && answerText ? ` → ${answerText}` : ""}</span></div>}
       </div>
       {!showAnswer ? (
         <div className="show-bar"><button className="btn primary block" onClick={() => setShowAnswer(true)}>Show answer</button></div>
@@ -225,6 +242,19 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
         </div>
       )}
       {info && <CardInfo card={card} onClose={() => setInfo(false)} onSaved={() => { setRev((r) => r + 1); flash("Saved"); }} />}
+      {leech && (
+        <div className="sheet-backdrop" onClick={() => setLeech(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>
+          <b>This card keeps slipping</b>
+          <p className="small muted" style={{ marginTop: 4 }}>{leech.lapses} times forgotten after learning it. Why, this time?</p>
+          <div style={{ display: "grid", gap: 8 }}>
+            <button className="btn block" onClick={async () => { await store.leechReason(leech.cardId, "knowledge"); setLeech(null); flash("Marked: never really learned it"); }}>I never really learned it</button>
+            <button className="btn block" onClick={async () => { await store.leechReason(leech.cardId, "retrieval"); setLeech(null); flash("Marked: can't recall it"); }}>I know it but can't recall it</button>
+            <button className="btn block" onClick={async () => { await store.leechReason(leech.cardId, "confusion"); setLeech(null); flash("Added to the list for Claude"); }}>I mix it up with something similar</button>
+            <button className="btn danger block" onClick={async () => { await store.leechReason(leech.cardId, "suspend"); setLeech(null); flash("Suspended"); }}>Suspend it for now</button>
+          </div>
+          <p className="small muted" style={{ marginBottom: 0 }}>Mix-ups are collected under Settings → "Cards to ask Claude about"; send me that list and I'll make contrast cards.</p>
+        </div></div>
+      )}
       {toast && <div className="toast">{toast}</div>}
     </div>
   );

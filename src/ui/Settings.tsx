@@ -6,6 +6,7 @@ import { getMeta } from "../lib/db";
 import { useEffect } from "react";
 import { GitHubSync } from "../lib/sync";
 import { repairApp } from "./App";
+import { noteTitle } from "../lib/render";
 
 declare const __VERSION__: string;
 
@@ -21,6 +22,7 @@ export function Settings() {
   const s = store.settings;
   const [syncMsg, setSyncMsg] = useState("");
   const [fitMsg, setFitMsg] = useState("");
+  const [revMsg, setRevMsg] = useState("");
   const [showToken, setShowToken] = useState(false);
   const sy = s.sync;
   const setSync = (patch: Partial<typeof sy>) => store.saveSettings({ sync: { ...sy, ...patch } });
@@ -107,6 +109,7 @@ export function Settings() {
         </div>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.nightCards} onChange={(e) => store.saveSettings({ nightCards: e.target.checked })} /> Dark cards (night mode for card content)</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.swipe} onChange={(e) => store.saveSettings({ swipe: e.target.checked })} /> Swipe to answer (left = Again, right = Good)</label>
+        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.typeAnswers} onChange={(e) => store.saveSettings({ typeAnswers: e.target.checked })} /> Type the answer on language cards</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.burySiblings} onChange={(e) => store.saveSettings({ burySiblings: e.target.checked })} /> Bury siblings (don't show two cards of one note in a session)</label>
         <div className="field"><label>Streak rest days per week</label>
           <select value={s.restDays} onChange={(e) => store.saveSettings({ restDays: Number(e.target.value) })}>
@@ -118,6 +121,23 @@ export function Settings() {
           </select></div>
       </div>
 
+      {store.reversibleNotetypes().length > 0 && (<>
+        <h2>Language cards</h2>
+        <div className="card-box">
+          <p className="small muted" style={{ marginTop: 0 }}>Reverse cards ask the other direction (German → English as well as English → German). Turning one off suspends its reverse cards; history is kept.</p>
+          {store.reversibleNotetypes().map(({ nt, notes, on }) => (
+            <label key={nt.id} className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={on && !store.cardsOfNoteType(nt.id, 1).every((c) => c.suspended)} onChange={async (e) => { setRevMsg("Working…"); const n = await store.setReverse(nt.id, e.target.checked); setRevMsg(`${n?.toLocaleString()} reverse cards ${e.target.checked ? "added" : "suspended"}.`); }} /> {nt.name} <span className="muted">· {notes.toLocaleString()} notes</span></label>
+          ))}
+          {revMsg && <p className="small muted" style={{ marginBottom: 0 }}>{revMsg}</p>}
+        </div>
+      </>)}
+      <h2>Cards to ask Claude about</h2>
+      <div className="card-box">
+        <p className="small muted" style={{ marginTop: 0 }}>Leeches you marked as "mixed up with something similar". Copy the list into the chat and I'll make contrast cards for them.</p>
+        {(() => { const list = [...store.notes.values()].filter((n) => n.tags.includes("ask-claude")); return list.length ? (
+          <div className="row"><span className="small grow">{list.length} card{list.length === 1 ? "" : "s"}</span><button className="btn" onClick={async () => { const text = list.map((n) => "- " + noteTitle(n)).join("\n"); try { await navigator.clipboard.writeText(text); setResult("Copied " + list.length + " cards."); } catch { prompt("Copy this list:", text); } }}>Copy list</button><button className="btn" onClick={async () => { for (const n of list) await store.updateNote(n.id, n.fields, n.tags.filter((t) => t !== "ask-claude" && !t.startsWith("auto::"))); }}>Clear</button></div>
+        ) : <p className="small muted" style={{ margin: 0 }}>Nothing yet.</p>; })()}
+      </div>
       <h2>Data</h2>
       <div className="card-box">
         <div className="small muted">{store.notes.size.toLocaleString()} notes · {store.cards.size.toLocaleString()} cards · {store.reviews.length.toLocaleString()} reviews on this device.</div>

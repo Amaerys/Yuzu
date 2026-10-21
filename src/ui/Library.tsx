@@ -6,6 +6,7 @@ import type { Card, CardState } from "../lib/model";
 import { IconChevron, IconPlay, IconClose, IconPin } from "./icons";
 import { useEffect, useRef } from "react";
 import { Duplicates } from "./Duplicates";
+import { bossPool, BOSS_PASS } from "./Boss";
 
 function findNode(root: TreeNode, path: string): TreeNode | null {
   if (!path) return root;
@@ -56,7 +57,7 @@ function SmartEditor({ initial, onClose }: { initial?: SmartDeck; onClose: () =>
   );
 }
 
-export function Library({ onStudy }: { onStudy: (path: string, view: View) => void }) {
+export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: View) => void; onBoss: (path: string, view: View, name: string) => void }) {
   const [view, setView] = useState<View>("decks");
   const [path, setPath] = useState("");
   const [showCards, setShowCards] = useState(false);
@@ -143,6 +144,11 @@ export function Library({ onStudy }: { onStudy: (path: string, view: View) => vo
               <span className="c-due">{counts.due} due</span><span className="c-learn">{counts.learning} learning</span><span className="c-new">{counts.fresh} new</span>
               {smart && <button className="chip" style={{ marginLeft: "auto" }} onClick={() => setEditSmart(smart)}>Edit</button>}
             </div>
+            {view !== "smart" && path && (() => { const pool = bossPool(path, view).length; const b = store.settings.bosses[`${view}:${path}`]; return pool >= 10 ? (
+              <div className="row small" style={{ marginTop: 10 }}>
+                <button className="chip yuzu" onClick={() => onBoss(path, view, title)}>⚔ Boss fight</button>
+                <span className="muted">{b ? `best ${Math.round(b.best * 100)}%${b.passed ? " · defeated" : ""}` : `${pool} well-learned cards, 20 random, no hints, ${Math.round(BOSS_PASS * 100)}% to pass`}</span>
+              </div>) : null; })()}
           </div>
           <div className="field"><input placeholder="Search cards and tags here" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
           {!query && node && node.children.length > 0 && (

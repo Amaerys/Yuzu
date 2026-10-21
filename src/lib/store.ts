@@ -24,13 +24,16 @@ export interface Settings {
   /** Mastery thresholds in days of stability. */
   mastery: { developing: number; mastered: number; durable: number };
   leechThreshold: number;
+  /** Boss fight results per node key (view:path). */
+  bosses: Record<string, { at: number; score: number; best: number; passed: boolean }>;
+  typeAnswers: boolean;
   smart: SmartDeck[];
   sync: { owner: string; repo: string; token: string; auto: boolean };
 }
 export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
-  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8,
+  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, bosses: {}, typeAnswers: true,
 };
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
 export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number; pending?: boolean }
@@ -544,9 +547,59 @@ export class Store {
     if (g === 3 && intervalDays >= 2 && durationMs > Math.max(15000, 2.5 * this.typicalAnswerMs())) next.due = now + Math.round((next.due - now) * 0.85);
     this.cards.set(cardId, next);
     this.reviews.push(review);
+    // Leech: every `leechThreshold` lapses, mark the note and let the UI ask what went wrong.
+    let leech = false;
+    const note = this.notes.get(card.nid);
+    if (g === 1 && note && next.lapses >= this.settings.leechThreshold && next.lapses % this.settings.leechThreshold === 0) {
+      leech = true;
+      if (!note.tags.includes("leech")) { const m = { ...note, tags: [...note.tags, "leech"], modified: now }; this.notes.set(note.id, m); await this.persist("tagging a leech", db.putOne("notes", m)); }
+    }
+    this.lastAnswer = { cardId, leech, lapses: next.lapses };
     await this.persist("saving the review", Promise.all([db.putOne("cards", next), db.putOne("reviews", review), db.setMeta("undo:" + review.id, card)]));
     this.bump(); this.touch();
     return next;
+  }
+  lastAnswer: { cardId: string; leech: boolean; lapses: number } | null = null;
+
+  /** Record why a leech was missed; tags drive later remediation (packs from Claude, suspension). */
+  async leechReason(cardId: string, reason: "knowledge" | "retrieval" | "confusion" | "suspend") {
+    const c = this.cards.get(cardId); const n = c && this.notes.get(c.nid); if (!c || !n) return;
+    if (reason === "suspend") { await this.setSuspended(cardId, true); return; }
+    const tags = n.tags.filter((t) => !t.startsWith("leech::")).concat("leech::" + reason, ...(reason === "confusion" ? ["ask-claude"] : []));
+    await this.updateNote(n.id, n.fields, tags.filter((t) => !t.startsWith("auto::")));
+  }
+
+  /** Language note types (standard, single template) that can get reverse cards. */
+  reversibleNotetypes(): { nt: Notetype; notes: number; on: boolean }[] {
+    const count = new Map<string, number>();
+    for (const c of this.cards.values()) { if (!c.source.startsWith("Languages") || c.ord !== 0) continue; const n = this.notes.get(c.nid); if (n) count.set(n.ntid, (count.get(n.ntid) ?? 0) + 1); }
+    return [...count].map(([id, n]) => ({ nt: this.notetypes.get(id)!, notes: n, on: !!this.notetypes.get(id)?.templates.some((t) => t.name === "Yuzu reverse") })).filter((x) => x.nt && x.nt.kind === "standard" && x.nt.fields.length >= 2 && (x.nt.templates.length === 1 || x.on)).sort((a, b) => b.notes - a.notes);
+  }
+  /** Add (or suspend) reverse cards for a language note type: back → front. */
+  async setReverse(ntid: string, on: boolean) {
+    const nt = this.notetypes.get(ntid); if (!nt) return; const now = Date.now();
+    const hasRev = nt.templates.some((t) => t.name === "Yuzu reverse");
+    if (on && !hasRev) {
+      const [f1, f2] = nt.fields;
+      const next = { ...nt, templates: [...nt.templates, { name: "Yuzu reverse", qfmt: `{{${f2}}}`, afmt: `{{FrontSide}}<hr id=answer>{{${f1}}}` }] };
+      this.notetypes.set(ntid, next); await db.putOne("notetypes", next);
+    }
+    const ord = nt.templates.findIndex((t) => t.name === "Yuzu reverse"); const revOrd = ord >= 0 ? ord : nt.templates.length;
+    const out: Card[] = [];
+    for (const c of [...this.cards.values()]) {
+      if (c.ord !== 0) continue; const n = this.notes.get(c.nid); if (!n || n.ntid !== ntid) continue;
+      const id = `${c.nid}-r${revOrd}`; const existing = this.cards.get(id);
+      if (on) { if (existing) { if (existing.suspended) out.push({ ...existing, suspended: false, mod: now }); } else out.push({ id, nid: c.nid, ord: revOrd, state: "new", suspended: false, flag: 0, due: now, stability: 0, difficulty: 0, reps: 0, lapses: 0, lastReview: 0, step: 0, created: now, mod: now, source: c.source }); }
+      else if (existing && !existing.suspended) out.push({ ...existing, suspended: true, mod: now });
+    }
+    for (const c of out) this.cards.set(c.id, c);
+    await this.persist("updating reverse cards", db.putMany("cards", out));
+    this.bump(); this.touch();
+    return out.length;
+  }
+  cardsOfNoteType(ntid: string, ord: number): Card[] { const out: Card[] = []; for (const c of this.cards.values()) if (c.ord === ord) { const n = this.notes.get(c.nid); if (n?.ntid === ntid) out.push(c); } return out; }
+  async recordBoss(key: string, score: number, passed: boolean) {
+    const prev = this.settings.bosses[key]; await this.saveSettings({ bosses: { ...this.settings.bosses, [key]: { at: Date.now(), score, best: Math.max(score, prev?.best ?? 0), passed: passed || !!prev?.passed } } });
   }
 
   /** Median answer time over the last 200 reviews (ms), or 8 s when there is no history. */

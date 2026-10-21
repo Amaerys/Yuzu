@@ -6,6 +6,7 @@ import { Settings } from "./Settings";
 import { Study } from "./Study";
 import { IconToday, IconLibrary, IconProgress, IconSettings, YuzuMark } from "./icons";
 import { Progress } from "./Progress";
+import { Boss } from "./Boss";
 
 type Tab = "today" | "library" | "progress" | "settings";
 
@@ -68,8 +69,9 @@ export function App() { return <ErrorBoundary><AppInner /></ErrorBoundary>; }
 function AppInner() {
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
   const [tab, setTab] = useState<Tab>("today");
-  const [study, setStudy] = useState<{ path: string; view: View } | null>(null);
+  const [study, setStudy] = useState<{ path: string; view: View; boss?: string } | null>(null);
   const startStudy = (path: string, view: View = "decks") => setStudy({ path, view });
+  const startBoss = (path: string, view: View, name: string) => setStudy({ path, view, boss: name });
   const [update, setUpdate] = useState<(() => void) | null>(null);
 
   useEffect(() => {
@@ -84,13 +86,14 @@ function AppInner() {
   if (!store.loaded) {
     return <div className="screen" style={{ display: "flex", flexDirection: "column", gap: 16, alignItems: "center", justifyContent: "center", minHeight: "80dvh" }}><YuzuMark size={56} />{slow && <div className="small muted" style={{ textAlign: "center" }}>Still loading… a large collection can take a few seconds.<br /><button className="btn" style={{ marginTop: 10 }} onClick={repairApp}>Repair app</button></div>}</div>;
   }
+  if (study !== null && study.boss !== undefined) return <Boss path={study.path} view={study.view} name={study.boss} onExit={() => setStudy(null)} />;
   if (study !== null) return <Study path={study.path} view={study.view} onExit={() => setStudy(null)} />;
 
   return (
     <div className="app">
       {tab === "today" && <Today onStudy={startStudy} />}
-      {tab === "library" && <Library onStudy={startStudy} />}
-      {tab === "progress" && <Progress />}
+      {tab === "library" && <Library onStudy={startStudy} onBoss={startBoss} />}
+      {tab === "progress" && <Progress onBoss={startBoss} />}
       {tab === "settings" && <Settings />}
       {store.saveError && <div className="toast row" style={{ borderColor: "var(--again)" }}>Changes are not being saved ({store.saveError}). <button className="btn" style={{ minHeight: 32, padding: "4px 12px" }} onClick={downloadBackup}>Back up now</button></div>}
       {update && <div className="toast row">New version ready <button className="btn primary" style={{ minHeight: 32, padding: "4px 12px" }} onClick={update}>Update</button></div>}

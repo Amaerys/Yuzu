@@ -15,22 +15,22 @@ import { noteTitle } from "../lib/render";
 
 export const PACK_CLOZE: Notetype = {
   id: "yuzu-cloze", name: "Yuzu Cloze", kind: "cloze",
-  css: ".card{font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:20px;line-height:1.45;text-align:left;padding:4px} .extra{margin-top:14px;padding-top:10px;border-top:1px solid #8884;font-size:17px;opacity:.9} img{max-width:100%;border-radius:8px;display:block;margin:10px auto}",
-  fields: ["Text", "Extra", "Image"],
-  templates: [{ name: "Cloze", qfmt: "{{#Image}}{{Image}}{{/Image}}{{cloze:Text}}", afmt: "{{#Image}}{{Image}}{{/Image}}{{cloze:Text}}{{#Extra}}<div class=extra>{{Extra}}</div>{{/Extra}}" }],
+  css: ".card{font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:20px;line-height:1.45;text-align:left;padding:4px} .extra{margin-top:14px;padding-top:10px;border-top:1px solid #8884;font-size:17px;opacity:.9} img{max-width:100%;border-radius:8px;display:block;margin:10px auto} .src{margin-top:12px;font-size:12px;opacity:.6}",
+  fields: ["Text", "Extra", "Image", "Source"],
+  templates: [{ name: "Cloze", qfmt: "{{#Image}}{{Image}}{{/Image}}{{cloze:Text}}", afmt: "{{#Image}}{{Image}}{{/Image}}{{cloze:Text}}{{#Extra}}<div class=extra>{{Extra}}</div>{{/Extra}}{{#Source}}<div class=src>{{Source}}</div>{{/Source}}" }],
 };
 export const PACK_BASIC: Notetype = {
   id: "yuzu-basic", name: "Yuzu Basic", kind: "standard",
   css: PACK_CLOZE.css,
-  fields: ["Front", "Back", "Image"],
-  templates: [{ name: "Card 1", qfmt: "{{#Image}}{{Image}}{{/Image}}{{Front}}", afmt: "{{FrontSide}}<hr id=answer>{{Back}}" }],
+  fields: ["Front", "Back", "Image", "Source"],
+  templates: [{ name: "Card 1", qfmt: "{{#Image}}{{Image}}{{/Image}}{{Front}}", afmt: "{{FrontSide}}<hr id=answer>{{Back}}{{#Source}}<div class=src>{{Source}}</div>{{/Source}}" }],
 };
 
 // Revisions: give a card a stable "id" (unique within the pack) and re-importing a later version updates
 // that note in place, keeping its review history. "replaces" names an existing note id to update instead
 // (used to revise cards imported before they had ids).
-export interface PackCard { id?: string; replaces?: string; type?: "cloze" | "basic"; text?: string; extra?: string; front?: string; back?: string; image?: string; tags?: string[]; category?: string }
-export interface Pack { yuzu_pack: 1; id?: string; name?: string; category?: string; tags?: string[]; cards: PackCard[] }
+export interface PackCard { id?: string; replaces?: string; source?: string; type?: "cloze" | "basic"; text?: string; extra?: string; front?: string; back?: string; image?: string; tags?: string[]; category?: string }
+export interface Pack { yuzu_pack: 1; id?: string; name?: string; source?: string; category?: string; tags?: string[]; cards: PackCard[] }
 
 export interface PackResult { notetypes: Notetype[]; notes: Note[]; cards: Card[]; media: { name: string; dataUrl: string }[]; skipped: number; similar: number; updated: string[]; unchanged: number }
 
@@ -66,7 +66,8 @@ export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.no
     const nt = type === "cloze" ? PACK_CLOZE : PACK_BASIC;
     let imageField = "";
     if (c.image && /^data:image\//.test(c.image)) { const name = `pack-${hash(c.image)}.${c.image.slice(11, c.image.indexOf(";")) || "png"}`; media.push({ name, dataUrl: c.image }); imageField = `<img src="${name}">`; }
-    const fields = type === "cloze" ? [c.text ?? "", c.extra ?? "", imageField] : [c.front ?? "", c.back ?? "", imageField];
+    const src = c.source ?? p.source ?? "";
+    const fields = type === "cloze" ? [c.text ?? "", c.extra ?? "", imageField, src] : [c.front ?? "", c.back ?? "", imageField, src];
     if (!fields[0].trim()) { skipped++; return; }
     const norm = normalizeText(fields.slice(0, 2).join(" "));
     const target = c.replaces && byId.has(c.replaces) ? c.replaces : c.id ? "p" + hash(packKey + "#" + c.id) : null;
@@ -74,7 +75,7 @@ export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.no
     if (prev) {
       // Revision of a card already in the collection: update in place, keep scheduling.
       const tags = [...new Set([...prev.tags.filter((t) => t !== "needs-review::similar"), ...(p.tags ?? []), ...(c.tags ?? [])])];
-      if (normOf.get(prev.id) === norm && prev.fields[2] === fields[2] && tags.length === prev.tags.length) { unchanged++; return; }
+      if (normOf.get(prev.id) === norm && prev.fields[2] === fields[2] && (prev.fields[3] ?? "") === fields[3] && tags.length === prev.tags.length) { unchanged++; return; }
       const ntid = nt.id;
       notes.push({ ...prev, ntid, fields, tags, modified: Math.max(now + i, prev.modified + 1) });
       updated.push(prev.id);
