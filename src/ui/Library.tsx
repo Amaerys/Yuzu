@@ -68,6 +68,8 @@ export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: Vie
   const [editSmart, setEditSmart] = useState<SmartDeck | null | "new">(null);
   const [moveTo, setMoveTo] = useState<string | null>(null);
   const [tool, setTool] = useState<"dupes" | null>(null);
+  const [rename, setRename] = useState<string | null>(null);
+  const [classify, setClassify] = useState<"System" | "Specialty" | null>(null);
   const v = store.getVersion();
   const similarCount = useMemo(() => store.similarPairs().length, [v]);
   const tree = store.tree(view === "smart" ? "decks" : view);
@@ -137,6 +139,7 @@ export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: Vie
                 <div style={{ fontWeight: 700, fontSize: 18 }}>{title}</div>
                 <div className="small muted">{counts.total.toLocaleString()} cards · {counts.susp.toLocaleString()} suspended · {counts.studied.toLocaleString()} studied</div>
               </div>
+              {view === "decks" && path && <button className="icon-btn" aria-label="Rename or move" title="Rename or move this category" onClick={() => setRename(path)}>✎</button>}
               <button className={"icon-btn" + (pinned ? " on" : "")} aria-label="Pin" onClick={() => store.saveSettings({ pins: pinned ? store.settings.pins.filter((p) => !(p.view === view && p.path === path)) : [...store.settings.pins, { view, path }] })}><IconPin /></button>
               <button className="btn primary" onClick={() => onStudy(path, view)} disabled={counts.due + counts.fresh + counts.learning === 0}><IconPlay /> Study</button>
             </div>
@@ -189,6 +192,8 @@ export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: Vie
           <button className="btn" onClick={() => doBulk({ flag: 1 })}>Flag</button>
           <button className="btn" onClick={() => { const t = prompt("Tag to add (use :: for hierarchy)"); if (t) doBulk({ addTag: t.trim().replace(/\s+/g, "_") }); }}>Tag</button>
           <button className="btn" onClick={() => setMoveTo("")}>Move</button>
+          <button className="btn" onClick={() => setClassify("System")}>System</button>
+          <button className="btn" onClick={() => setClassify("Specialty")}>Specialty</button>
         </div>
       )}
       {moveTo !== null && (
@@ -197,6 +202,29 @@ export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: Vie
           <div className="field"><label>Category path (use :: for levels)</label><input value={moveTo} list="deckpaths" onChange={(e) => setMoveTo(e.target.value)} placeholder="Medicine::Cardiology::ECG" /></div>
           <datalist id="deckpaths">{[...new Set([...store.cards.values()].map((c) => c.source))].sort().map((p) => <option key={p} value={p} />)}</datalist>
           <button className="btn primary block" disabled={!moveTo.trim()} onClick={async () => { await doBulk({ source: moveTo.trim() }); setMoveTo(null); }}>Move</button>
+        </div></div>
+      )}
+      {rename !== null && (
+        <div className="sheet-backdrop" onClick={() => setRename(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>
+          <b>Rename or move “{path.split("::").pop()}”</b>
+          <p className="small muted" style={{ marginTop: 4 }}>Edit the full path. Change the last part to rename; change the part before it to move the category (and everything inside it) somewhere else.</p>
+          <div className="field"><label>Full path</label><input value={rename} list="deckpaths" onChange={(e) => setRename(e.target.value)} /></div>
+          <datalist id="deckpaths">{[...new Set([...store.cards.values()].map((c) => c.source))].sort().map((p) => <option key={p} value={p} />)}</datalist>
+          <button className="btn primary block" disabled={!rename.trim() || rename.trim() === path} onClick={async () => { const to = rename.trim(); await store.renamePath(path, to); setRename(null); go(to.replace(/\s*::\s*/g, "::")); }}>Apply</button>
+        </div></div>
+      )}
+      {classify && (
+        <div className="sheet-backdrop" onClick={() => setClassify(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>
+          <b>{classify} for {selected.size} cards</b>
+          <p className="small muted" style={{ marginTop: 4 }}>Tap to add; tap again (when all selected cards have it) to remove. A card can belong to several.</p>
+          <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+            {(classify === "System" ? SYSTEM_NAMES : store.tree("specialties").children.map((c) => c.name).filter((n) => n !== "Other")).map((name) => {
+              const tag = `auto::${classify}::${name}`; const ids = [...selected]; const all = ids.every((id) => store.noteFor(store.cards.get(id)!)?.tags.includes(tag));
+              return <button key={name} className={"chip" + (all ? " orange" : "")} onClick={() => store.classify(ids, classify, name, !all)}>{name}</button>;
+            })}
+          </div>
+          {classify === "Specialty" && <div className="field" style={{ marginTop: 10 }}><label>New specialty</label><div className="row"><input className="grow" id="newspec" placeholder="e.g. Toxicology" /><button className="btn" onClick={() => { const v = (document.getElementById("newspec") as HTMLInputElement).value.trim(); if (v) store.classify([...selected], "Specialty", v, true); }}>Add</button></div></div>}
+          <button className="btn block" style={{ marginTop: 10 }} onClick={() => setClassify(null)}>Done</button>
         </div></div>
       )}
       {preview && <Preview card={preview} onClose={() => setPreview(null)} />}

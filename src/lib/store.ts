@@ -180,7 +180,7 @@ export class Store {
       const p = n.tags.filter((t) => t.startsWith("auto::Exam::") || t.startsWith("auto::Level::")).map((t) => t.startsWith("auto::Exam::") ? t.slice(12) : "German level::" + t.slice(13));
       return p.length ? p : ["No exam"];
     }
-    const p = n.tags.filter((t) => !t.startsWith("auto::"));
+    const p = n.tags.filter((t) => !t.startsWith("auto::") && !t.startsWith("manual::"));
     return p.length ? p : ["Untagged"];
   }
 
@@ -263,7 +263,9 @@ export class Store {
       const existing = this.notes.get(n.id);
       if (!existing) newNotes++; else if (existing.modified < n.modified) updated++; else continue;
       // Keep tags added in Yuzu (auto::…, needs-review, pack tags) when Anki's version of the note is newer.
-      const merged = existing ? { ...n, tags: [...new Set([...n.tags, ...existing.tags.filter((t) => t.startsWith("auto::") || t.startsWith("needs-review::"))])] } : n;
+      const keepTags = existing ? existing.tags.filter((t) => t.startsWith("auto::") || t.startsWith("needs-review::") || t.startsWith("manual::") || t.startsWith("leech") || t === "ask-claude") : [];
+      const importTags = existing?.tags.includes("manual::classified") ? n.tags.filter((t) => !t.startsWith("auto::")) : n.tags; // manual classification wins over the classifier
+      const merged = existing ? { ...n, tags: [...new Set([...importTags, ...keepTags])] } : n;
       this.notes.set(n.id, merged); notesOut.push(merged);
     }
     const knownReviewIds = new Set(this.reviews.map((r) => r.id));
@@ -594,6 +596,28 @@ export class Store {
     }
     for (const c of out) this.cards.set(c.id, c);
     await this.persist("updating reverse cards", db.putMany("cards", out));
+    this.bump(); this.touch();
+    return out.length;
+  }
+  /** Rename or move a deck node: every card under `from` gets the same path with `to` in its place. */
+  async renamePath(from: string, to: string): Promise<number> {
+    to = to.trim().replace(/\s*::\s*/g, "::").replace(/^::|::$/g, ""); if (!from || !to || from === to) return 0;
+    const now = Date.now(); const out: Card[] = [];
+    for (const c of this.cards.values()) if (c.source === from || c.source.startsWith(from + "::")) out.push({ ...c, source: to + c.source.slice(from.length), mod: now });
+    for (const c of out) this.cards.set(c.id, c);
+    const pins = this.settings.pins.map((p) => (p.view === "decks" && (p.path === from || p.path.startsWith(from + "::")) ? { ...p, path: to + p.path.slice(from.length) } : p));
+    await this.persist("renaming the category", db.putMany("cards", out)); if (pins.some((p, i) => p !== this.settings.pins[i])) await this.saveSettings({ pins });
+    this.bump(); this.touch();
+    return out.length;
+  }
+  /** Add or remove a classification tag (auto::System::X / auto::Specialty::Y) on the notes of the given cards. Manual choices survive re-imports. */
+  async classify(cardIds: string[], kind: "System" | "Specialty", name: string, on: boolean): Promise<number> {
+    const tag = `auto::${kind}::${name}`; const now = Date.now(); const out: Note[] = []; const seen = new Set<string>();
+    for (const id of cardIds) { const c = this.cards.get(id); if (!c || seen.has(c.nid)) continue; seen.add(c.nid); const n = this.notes.get(c.nid); if (!n) continue;
+      const manual = n.tags.includes("manual::classified") ? [] : ["manual::classified"]; // from now on the automatic classifier leaves this note alone
+      if (on && !n.tags.includes(tag)) out.push({ ...n, tags: [...n.tags, tag, ...manual], modified: now }); else if (!on && n.tags.includes(tag)) out.push({ ...n, tags: [...n.tags.filter((t) => t !== tag), ...manual], modified: now }); }
+    for (const n of out) this.notes.set(n.id, n);
+    await this.persist("updating categories", db.putMany("notes", out));
     this.bump(); this.touch();
     return out.length;
   }
