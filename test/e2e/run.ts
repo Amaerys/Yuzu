@@ -61,7 +61,7 @@ try {
   await page.waitForFunction(() => document.body.innerText.includes("cards added"), null, { timeout: 30000 });
   console.log("pack:", await page.locator("text=/cards added/").first().innerText());
   await page.click("nav.tabs >> text=Library"); await page.click(".seg >> text=Decks");
-  await page.fill("input[placeholder^=Search]", "tented"); await page.waitForTimeout(300);
+  await page.fill("input[placeholder^=Search]", "peaked (tented) t waves, best seen"); await page.waitForTimeout(300);
   await page.locator(".list-row").first().click(); await page.waitForSelector("text=Preview");
   const imgOk = await page.locator(".sheet .card-host").evaluate((el) => { const img = el.shadowRoot!.querySelector("img") as HTMLImageElement | null; return img ? img.src.startsWith("blob:") : false; });
   console.log("pack image renders:", imgOk);
