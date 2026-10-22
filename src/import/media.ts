@@ -2,9 +2,8 @@
 // Only images that the notes in Yuzu reference are extracted; each is resized and re-encoded
 // so a 600 MB deck lands at ~100–200 MB on the device. Works on files of any size (streamed).
 import type { Note } from "../lib/model";
-import { ZipFile } from "../lib/zipfile";
-import type { Inflate } from "../lib/zip";
-import { decodeProto, protoBytes, protoString } from "../lib/proto";
+import { ZipFile, type Inflate } from "../lib/zipfile";
+import { decodeProto, protoString } from "../lib/proto";
 
 export interface MediaEnv { inflateRaw: Inflate; zstd?: (d: Uint8Array) => Promise<Uint8Array>; onProgress?: (msg: string, frac?: number) => void }
 export interface MediaImportResult { stored: number; skipped: number; missing: number; bytes: number; audio: number }
@@ -36,7 +35,6 @@ export async function readMediaMap(zip: ZipFile, env: MediaEnv): Promise<{ map: 
   // MediaEntries { repeated MediaEntry entries = 1 }, MediaEntry { string name = 1; uint32 size = 2; bytes sha1 = 3 }
   const fields = decodeProto(buf); let i = 0;
   for (const f of fields) if (f.num === 1 && f.value instanceof Uint8Array) { const name = protoString(decodeProto(f.value), 1); if (name) map.set(name, String(i)); i++; }
-  void protoBytes;
   return { map, modern: true };
 }
 

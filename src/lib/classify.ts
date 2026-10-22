@@ -30,7 +30,13 @@ const SPECIALTY_FROM_SOURCE: [RegExp, string][] = [
   [/internal medicine/i, "Internal Medicine"],
   [/surgery|orthop/i, "Surgery"],
   [/pharmacolog/i, "Pharmacology"],
-  [/step ?1/i, "USMLE Step 1"],
+  [/anesth|ankisthesia|critical care/i, "Anesthesia & Critical Care"],
+  [/derm/i, "Dermatology"],
+  [/anatom/i, "Anatomy"],
+  [/obgyn|obstetric|gynec/i, "Obstetrics & Gynecology"],
+  [/pediatric|\bpeds\b/i, "Pediatrics"],
+  [/neurolog/i, "Neurology"],
+  [/biostat|epidemiolog/i, "Biostatistics & Epidemiology"],
   [/occupational|arbeits/i, "Occupational Medicine"],
 ];
 

@@ -74,6 +74,49 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
   return (
     <div className="screen">
       <h1>Settings</h1>
+      <h2>Studying</h2>
+      <div className="card-box">
+        <div className="field"><label>New cards per day</label><input type="number" min={0} max={500} value={s.newPerDay} onChange={(e) => store.saveSettings({ newPerDay: Number(e.target.value) })} /></div>
+        <div className="field"><label>Daily review goal</label><input type="number" min={1} max={2000} value={s.dailyGoal} onChange={(e) => store.saveSettings({ dailyGoal: Number(e.target.value) })} /></div>
+        <div className="field"><label>Desired retention (FSRS)</label>
+          <select value={s.scheduler.desiredRetention} onChange={(e) => store.saveSettings({ scheduler: { ...s.scheduler, desiredRetention: Number(e.target.value) } })}>
+            {[0.8, 0.85, 0.9, 0.95].map((r) => <option key={r} value={r}>{Math.round(r * 100)}%</option>)}
+          </select></div>
+        <div className="field"><label>Scheduler weights</label>
+          <div className="row"><button className="btn grow" disabled={!!store.fitting} onClick={async () => { setFitMsg("Fitting…"); setFitMsg(await store.optimizeScheduler()); }}>{store.fitting ? `Fitting… ${Math.round(store.fitting.progress * 100)}%` : "Tune to my history"}</button></div>
+          <p className="small muted" style={{ marginBottom: 0 }}>{fitMsg || (s.fit ? `Fitted ${new Date(s.fit.at).toLocaleDateString()} on ${s.fit.n.toLocaleString()} reviews (error ${s.fit.before.toFixed(3)} → ${s.fit.after.toFixed(3)}). Re-runs automatically every ~1000 reviews.` : "Default FSRS weights. Runs automatically once you have ~400 spaced reviews.")}</p>
+        </div>
+        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.nightCards} onChange={(e) => store.saveSettings({ nightCards: e.target.checked })} /> Slate cards (dark card paper, easier at night)</label>
+        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.swipe} onChange={(e) => store.saveSettings({ swipe: e.target.checked })} /> Swipe to answer (left = Again, right = Good)</label>
+        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.typeAnswers} onChange={(e) => store.saveSettings({ typeAnswers: e.target.checked })} /> Type the answer on language cards</label>
+        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.burySiblings} onChange={(e) => store.saveSettings({ burySiblings: e.target.checked })} /> Bury siblings (don't show two cards of one note in a session)</label>
+        <div className="field"><label>Streak rest days per week</label>
+          <select value={s.restDays} onChange={(e) => store.saveSettings({ restDays: Number(e.target.value) })}>
+            {[0, 1, 2].map((h) => <option key={h} value={h}>{h}</option>)}
+          </select></div>
+        <div className="field"><label>New day starts at</label>
+          <select value={s.rollover} onChange={(e) => store.saveSettings({ rollover: Number(e.target.value) })}>
+            {[0, 1, 2, 3, 4, 5, 6].map((h) => <option key={h} value={h}>{h}:00</option>)}
+          </select></div>
+      </div>
+
+      {reversible.length > 0 && (<>
+        <h2>Language cards</h2>
+        <div className="card-box">
+          <p className="small muted" style={{ marginTop: 0 }}>Reverse cards ask the other direction (German → English as well as English → German). Turning one off suspends its reverse cards; history is kept.</p>
+          {reversible.map(({ nt, notes, on }) => (
+            <label key={nt.id} className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={on && !store.cardsOfNoteType(nt.id, 1).every((c) => c.suspended)} onChange={async (e) => { setRevMsg("Working…"); const n = await store.setReverse(nt.id, e.target.checked); setRevMsg(`${n?.toLocaleString()} reverse cards ${e.target.checked ? "added" : "suspended"}.`); }} /> {nt.name} <span className="muted">· {notes.toLocaleString()} notes</span></label>
+          ))}
+          {revMsg && <p className="small muted" style={{ marginBottom: 0 }}>{revMsg}</p>}
+        </div>
+      </>)}
+      <h2>Cards to ask Claude about</h2>
+      <div className="card-box">
+        <p className="small muted" style={{ marginTop: 0 }}>Leeches you marked as "mixed up with something similar". Copy the list into the chat and I'll make contrast cards for them.</p>
+        {(() => { const list = askList; return list.length ? (
+          <div className="row"><span className="small grow">{list.length} card{list.length === 1 ? "" : "s"}</span><button className="btn" onClick={async () => { const text = list.map((n) => "- " + noteTitle(n)).join("\n"); try { await navigator.clipboard.writeText(text); setResult("Copied " + list.length + " cards."); } catch { prompt("Copy this list:", text); } }}>Copy list</button><button className="btn" onClick={async () => { for (const n of list) await store.updateNote(n.id, n.fields, n.tags.filter((t) => t !== "ask-claude" && !t.startsWith("auto::"))); setScan((x) => x + 1); }}>Clear</button></div>
+        ) : <p className="small muted" style={{ margin: 0 }}>Nothing yet.</p>; })()}
+      </div>
       <h2>Import from Anki</h2>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>Export from Anki as a <b>collection package (.colpkg)</b> or a deck (.apkg) <b>without media</b>, with scheduling included. Importing again later only adds what's new. Also accepts <b>Yuzu card packs</b> and <b>curation files</b> (.json) made by Claude: duplicates are skipped or merged, cards move to their categories, similar cards get the tag <i>needs-review::similar</i>. Large collections: import on a PC first, then sync to the phone.</p>
@@ -105,10 +148,10 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       <h2>Sync between devices</h2>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>Uses a <b>private</b> GitHub repository, like Orange. Create one named <b>yuzu-data</b>, then a fine-grained token limited to it with <b>Contents: read and write</b>. The token stays on this device.</p>
-        <div className="field"><label>GitHub username</label><input value={sy.owner} autoCapitalize="none" onChange={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Amaerys" /></div>
-        <div className="field"><label>Repository</label><input value={sy.repo} autoCapitalize="none" onChange={(e) => setSync({ repo: e.target.value.trim() })} /></div>
-        <div className="field"><label>Token</label><div className="row"><input className="grow" type={showToken ? "text" : "password"} value={sy.token} autoCapitalize="none" onChange={(e) => setSync({ token: e.target.value.trim() })} placeholder="github_pat_…" /><button className="btn" onClick={() => setShowToken(!showToken)}>{showToken ? "Hide" : "Show"}</button></div></div>
-        <div className="field"><label>This device's name</label><input value={s.deviceName} onChange={(e) => store.saveSettings({ deviceName: e.target.value })} placeholder="S25 Ultra" /></div>
+        <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Amaerys" /></div>
+        <div className="field"><label>Repository</label><input defaultValue={sy.repo} autoCapitalize="none" onBlur={(e) => setSync({ repo: e.target.value.trim() })} /></div>
+        <div className="field"><label>Token</label><div className="row"><input className="grow" type={showToken ? "text" : "password"} defaultValue={sy.token} autoCapitalize="none" onBlur={(e) => setSync({ token: e.target.value.trim() })} placeholder="github_pat_…" /><button className="btn" onClick={() => setShowToken(!showToken)}>{showToken ? "Hide" : "Show"}</button></div></div>
+        <div className="field"><label>This device's name</label><input defaultValue={s.deviceName} onBlur={(e) => store.saveSettings({ deviceName: e.target.value })} placeholder="S25 Ultra" /></div>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={sy.auto} onChange={(e) => setSync({ auto: e.target.checked })} /> Sync automatically after changes</label>
         <div className="row" style={{ marginTop: 8 }}>
           <button className="btn" disabled={!store.syncConfigured()} onClick={async () => { setSyncMsg("Checking…"); const r = await new GitHubSync({ owner: sy.owner, repo: sy.repo, token: sy.token }).check(); setSyncMsg(r.message); }}>Test</button>
@@ -126,49 +169,6 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         )}
       </div>
 
-      <h2>Studying</h2>
-      <div className="card-box">
-        <div className="field"><label>New cards per day</label><input type="number" min={0} max={500} value={s.newPerDay} onChange={(e) => store.saveSettings({ newPerDay: Number(e.target.value) })} /></div>
-        <div className="field"><label>Daily review goal</label><input type="number" min={1} max={2000} value={s.dailyGoal} onChange={(e) => store.saveSettings({ dailyGoal: Number(e.target.value) })} /></div>
-        <div className="field"><label>Desired retention (FSRS)</label>
-          <select value={s.scheduler.desiredRetention} onChange={(e) => store.saveSettings({ scheduler: { ...s.scheduler, desiredRetention: Number(e.target.value) } })}>
-            {[0.8, 0.85, 0.9, 0.95].map((r) => <option key={r} value={r}>{Math.round(r * 100)}%</option>)}
-          </select></div>
-        <div className="field"><label>Scheduler weights</label>
-          <div className="row"><button className="btn grow" disabled={!!store.fitting} onClick={async () => { setFitMsg("Fitting…"); setFitMsg(await store.optimizeScheduler()); }}>{store.fitting ? `Fitting… ${Math.round(store.fitting.progress * 100)}%` : "Tune to my history"}</button></div>
-          <p className="small muted" style={{ marginBottom: 0 }}>{fitMsg || (s.fit ? `Fitted ${new Date(s.fit.at).toLocaleDateString()} on ${s.fit.n.toLocaleString()} reviews (error ${s.fit.before.toFixed(3)} → ${s.fit.after.toFixed(3)}). Re-runs automatically every ~1000 reviews.` : "Default FSRS weights. Runs automatically once you have ~400 spaced reviews.")}</p>
-        </div>
-        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.nightCards} onChange={(e) => store.saveSettings({ nightCards: e.target.checked })} /> Dark cards (night mode for card content)</label>
-        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.swipe} onChange={(e) => store.saveSettings({ swipe: e.target.checked })} /> Swipe to answer (left = Again, right = Good)</label>
-        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.typeAnswers} onChange={(e) => store.saveSettings({ typeAnswers: e.target.checked })} /> Type the answer on language cards</label>
-        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.burySiblings} onChange={(e) => store.saveSettings({ burySiblings: e.target.checked })} /> Bury siblings (don't show two cards of one note in a session)</label>
-        <div className="field"><label>Streak rest days per week</label>
-          <select value={s.restDays} onChange={(e) => store.saveSettings({ restDays: Number(e.target.value) })}>
-            {[0, 1, 2].map((h) => <option key={h} value={h}>{h}</option>)}
-          </select></div>
-        <div className="field"><label>New day starts at</label>
-          <select value={s.rollover} onChange={(e) => store.saveSettings({ rollover: Number(e.target.value) })}>
-            {[0, 1, 2, 3, 4, 5, 6].map((h) => <option key={h} value={h}>{h}:00</option>)}
-          </select></div>
-      </div>
-
-      {reversible.length > 0 && (<>
-        <h2>Language cards</h2>
-        <div className="card-box">
-          <p className="small muted" style={{ marginTop: 0 }}>Reverse cards ask the other direction (German → English as well as English → German). Turning one off suspends its reverse cards; history is kept.</p>
-          {reversible.map(({ nt, notes, on }) => (
-            <label key={nt.id} className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={on && !store.cardsOfNoteType(nt.id, 1).every((c) => c.suspended)} onChange={async (e) => { setRevMsg("Working…"); const n = await store.setReverse(nt.id, e.target.checked); setRevMsg(`${n?.toLocaleString()} reverse cards ${e.target.checked ? "added" : "suspended"}.`); }} /> {nt.name} <span className="muted">· {notes.toLocaleString()} notes</span></label>
-          ))}
-          {revMsg && <p className="small muted" style={{ marginBottom: 0 }}>{revMsg}</p>}
-        </div>
-      </>)}
-      <h2>Cards to ask Claude about</h2>
-      <div className="card-box">
-        <p className="small muted" style={{ marginTop: 0 }}>Leeches you marked as "mixed up with something similar". Copy the list into the chat and I'll make contrast cards for them.</p>
-        {(() => { const list = askList; return list.length ? (
-          <div className="row"><span className="small grow">{list.length} card{list.length === 1 ? "" : "s"}</span><button className="btn" onClick={async () => { const text = list.map((n) => "- " + noteTitle(n)).join("\n"); try { await navigator.clipboard.writeText(text); setResult("Copied " + list.length + " cards."); } catch { prompt("Copy this list:", text); } }}>Copy list</button><button className="btn" onClick={async () => { for (const n of list) await store.updateNote(n.id, n.fields, n.tags.filter((t) => t !== "ask-claude" && !t.startsWith("auto::"))); setScan((x) => x + 1); }}>Clear</button></div>
-        ) : <p className="small muted" style={{ margin: 0 }}>Nothing yet.</p>; })()}
-      </div>
       <h2>Data</h2>
       <div className="card-box">
         <div className="small muted">{store.notes.size.toLocaleString()} notes · {store.cards.size.toLocaleString()} cards · {store.reviews.length.toLocaleString()} reviews on this device.</div>

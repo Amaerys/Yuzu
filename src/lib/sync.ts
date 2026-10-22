@@ -11,7 +11,7 @@
 import type { Card, Note, Notetype, Review } from "./model";
 
 export interface SyncConfig { owner: string; repo: string; token: string; branch?: string }
-export interface Manifest { version: 1; files: Record<string, string>; updatedAt: number; device?: string }
+export interface Manifest { version: 1; files: Record<string, string>; updatedAt: number; device?: string; /** logical path → stored path, for gzip-compressed files */ stored?: Record<string, string> }
 
 export interface SyncSnapshot {
   notetypes: Notetype[]; notes: Note[]; cards: Card[]; reviews: Review[]; settings: Record<string, unknown>;
@@ -20,10 +20,11 @@ export interface SyncSnapshot {
   /** Small pack images as data URLs (name → data URL). Deck media is per device and never synced. */
   media?: Record<string, string>;
 }
-export interface SyncResult { pulled: { notes: number; cards: number; reviews: number }; pushed: number; commit?: string }
 export type Progress = (message: string) => void;
 
-export const NOTE_SHARDS = 32, CARD_SHARDS = 64;
+export const NOTE_SHARDS = 128, CARD_SHARDS = 256;
+/** Files above this size are stored gzip-compressed (".gz" suffix) so one review uploads kilobytes, not megabytes. */
+export const GZIP_ABOVE = 32 * 1024;
 const shardOf = (id: string, n: number) => { let h = 0; for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0; return h % n; };
 const enc = new TextEncoder();
 
@@ -32,6 +33,19 @@ export async function sha256(s: string): Promise<string> {
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+export async function gzip(s: string): Promise<Uint8Array> {
+  const cs = new CompressionStream("gzip"); const stream = new Blob([enc.encode(s) as BlobPart]).stream().pipeThrough(cs);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+export async function gunzip(bytes: Uint8Array): Promise<string> {
+  const ds = new DecompressionStream("gzip"); const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(ds);
+  return new Response(stream).text();
+}
 function utf8ToBase64(s: string): string {
   const bytes = enc.encode(s);
   let bin = "";
@@ -43,8 +57,8 @@ export class SyncError extends Error {
   constructor(message: string, public kind: "auth" | "notfound" | "conflict" | "network" | "ratelimit" | "other" = "other") { super(message); }
 }
 
-/** Cache of serialized shards: path → { fp (fingerprint of the records), json, hash }. */
-export type ShardCache = Map<string, { fp: string; json: string; hash: string }>;
+/** Cache of shard fingerprints: path → { fp (fingerprint of the records), hash of the JSON }. The JSON itself is not kept. */
+export type ShardCache = Map<string, { fp: string; hash: string }>;
 
 export class GitHubSync {
   fetchImpl: typeof fetch = (...a) => fetch(...a);
@@ -98,10 +112,12 @@ export class GitHubSync {
     } catch (e: any) { return { ok: false, message: e.message }; }
   }
 
-  private async readFile(path: string): Promise<string | null> {
-    const res = await this.request(`${this.base}/contents/${path}?ref=${this.branch}`, { headers: this.headers({ Accept: "application/vnd.github.raw+json" }) });
+  private async readFile(path: string, stored?: Record<string, string>): Promise<string | null> {
+    const real = stored?.[path] ?? path;
+    const res = await this.request(`${this.base}/contents/${real}?ref=${this.branch}`, { headers: this.headers({ Accept: "application/vnd.github.raw+json" }) });
     if (res.status === 404 || res.status === 409) return null;
     if (!res.ok) throw await this.explain(res, `read ${path}`);
+    if (real.endsWith(".gz")) return gunzip(new Uint8Array(await res.arrayBuffer()));
     return res.text();
   }
 
@@ -128,14 +144,16 @@ export class GitHubSync {
     return m;
   }
 
-  /** Serialize a snapshot into the file map used in the repo. Unchanged shards (same fingerprint) reuse the cache. */
-  static async shard(snap: SyncSnapshot, cache: ShardCache = new Map()): Promise<{ files: Record<string, string>; hashes: Record<string, string> }> {
-    const files: Record<string, string> = {}; const hashes: Record<string, string> = {};
+  /** Hash every shard of a snapshot. Unchanged shards (same fingerprint) reuse the cached hash and are not serialized;
+   *  `make(path)` serializes one shard on demand (only the changed ones get uploaded). */
+  static async shard(snap: SyncSnapshot, cache: ShardCache = new Map()): Promise<{ hashes: Record<string, string>; make: (path: string) => string }> {
+    const hashes: Record<string, string> = {}; const makers = new Map<string, () => string>();
     const emit = async (path: string, fp: string, make: () => string) => {
+      makers.set(path, make);
       const c = cache.get(path);
-      if (c && c.fp === fp) { files[path] = c.json; hashes[path] = c.hash; return; }
-      const json = make(); const hash = await sha256(json);
-      cache.set(path, { fp, json, hash }); files[path] = json; hashes[path] = hash;
+      if (c && c.fp === fp) { hashes[path] = c.hash; return; }
+      const hash = await sha256(make());
+      cache.set(path, { fp, hash }); hashes[path] = hash;
     };
     await emit("notetypes.json", "v" + snap.notetypes.length + ":" + snap.notetypes.map((n) => n.id).join(","), () => JSON.stringify(snap.notetypes));
     await emit("settings.json", JSON.stringify(snap.settings), () => JSON.stringify(snap.settings));
@@ -160,7 +178,7 @@ export class GitHubSync {
     const byMonth = new Map<string, Review[]>();
     for (const r of snap.reviews) { const k = new Date(r.ts).toISOString().slice(0, 7); (byMonth.get(k) ?? byMonth.set(k, []).get(k)!).push(r); }
     for (const [k, list] of byMonth) await emit(`reviews/${k}.json`, `${list.length}:${list.reduce((a, r) => a + r.ts, 0)}`, () => JSON.stringify(list.sort((a, b) => a.ts - b.ts)));
-    return { files, hashes };
+    return { hashes, make: (path) => makers.get(path)!() };
   }
 
   /** Download every remote file whose hash differs from `known` and return the parsed remote snapshot parts. */
@@ -168,22 +186,19 @@ export class GitHubSync {
     const changed = Object.entries(manifest.files).filter(([p, h]) => known[p] !== h);
     const out: Partial<SyncSnapshot> & { files: Record<string, string> } = { files: {} };
     let doneCount = 0;
-    const texts: (readonly [string, string | null])[] = [];
-    // Limit concurrency so a phone on a slow link does not open 100 connections at once.
+    const parsed: [string, any][] = [];
+    // Limit concurrency so a phone on a slow link does not open 100 connections at once; parse as files arrive so the raw text is not held.
     const queue = [...changed];
     const workers = Array.from({ length: 4 }, async () => {
       while (queue.length) {
         const [p] = queue.shift()!;
-        const t = await this.readFile(p);
-        texts.push([p, t] as const);
+        const t = await this.readFile(p, manifest.stored);
+        if (t != null) { try { parsed.push([p, JSON.parse(t)]); } catch { throw new SyncError(`${p} in the repository is corrupt; sync stopped without changing anything`, "other"); } }
         doneCount++; progress?.(`Downloading ${doneCount}/${changed.length}`);
       }
     });
     await Promise.all(workers);
-    for (const [p, t] of texts) {
-      if (t == null) continue; // listed in the manifest but missing: skip, it will be rewritten on push
-      let data: any;
-      try { data = JSON.parse(t); } catch { throw new SyncError(`${p} in the repository is corrupt; sync stopped without changing anything`, "other"); }
+    for (const [p, data] of parsed) {
       out.files[p] = manifest.files[p];
       if (p === "notetypes.json") out.notetypes = data;
       else if (p === "settings.json") out.settings = data;
@@ -214,29 +229,39 @@ export class GitHubSync {
   }
 
   /** Commit the given files (only those whose hash differs from the remote manifest). Returns the new manifest. */
-  async push(files: Record<string, string>, hashes: Record<string, string>, remote: Manifest | null, device: string, progress?: Progress): Promise<{ manifest: Manifest; commit: string | null; pushed: number }> {
-    const toWrite = Object.keys(files).filter((p) => !remote || remote.files[p] !== hashes[p]);
-    const toDelete = remote ? Object.keys(remote.files).filter((p) => !(p in files)) : [];
-    const manifest: Manifest = { version: 1, files: hashes, updatedAt: Date.now(), device };
-    if (!toWrite.length && !toDelete.length) return { manifest: remote ?? manifest, commit: null, pushed: 0 };
+  async push(hashes: Record<string, string>, make: (path: string) => string, remote: Manifest | null, device: string, progress?: Progress): Promise<{ manifest: Manifest; commit: string | null; pushed: number; bytes: number }> {
+    const toWrite = Object.keys(hashes).filter((p) => !remote || remote.files[p] !== hashes[p]);
+    const stored: Record<string, string> = { ...(remote?.stored ?? {}) };
+    for (const p of Object.keys(stored)) if (!(p in hashes)) delete stored[p];
+    const realOf = (p: string) => stored[p] ?? p;
+    const toDelete = remote ? Object.keys(remote.files).filter((p) => !(p in hashes)).map((p) => remote.stored?.[p] ?? p) : [];
+    const manifest: Manifest = { version: 1, files: hashes, updatedAt: Date.now(), device, stored };
+    if (!toWrite.length && !toDelete.length) return { manifest: remote ?? manifest, commit: null, pushed: 0, bytes: 0 };
     const baseCommit = await this.head();
     if (this.seenHead !== undefined && this.seenHead !== null && baseCommit !== this.seenHead) throw new SyncError("Another device synced in the meantime", "conflict");
     const baseTree = baseCommit ? (await this.api(`/git/commits/${baseCommit}`, {}, "read the last commit"))?.tree?.sha ?? null : null;
     const tree: any[] = [];
-    let n = 0;
+    let n = 0, bytes = 0;
     for (const p of toWrite) {
       progress?.(`Uploading ${++n}/${toWrite.length}`);
-      const blob = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content: utf8ToBase64(files[p]), encoding: "base64" }) }, `upload ${p}`);
-      tree.push({ path: p, mode: "100644", type: "blob", sha: blob.sha });
+      const json = make(p);
+      let content: string; let real = p;
+      if (json.length > GZIP_ABOVE) { const gz = await gzip(json); content = bytesToBase64(gz); real = p + ".gz"; bytes += gz.length; } else { content = utf8ToBase64(json); bytes += json.length; }
+      const prevReal = realOf(p);
+      if (prevReal !== real) tree.push({ path: prevReal, mode: "100644", type: "blob", sha: null }); // compression state changed: drop the old file
+      if (real !== p) stored[p] = real; else delete stored[p];
+      const blob = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content, encoding: "base64" }) }, `upload ${p}`);
+      tree.push({ path: real, mode: "100644", type: "blob", sha: blob.sha });
     }
     for (const p of toDelete) tree.push({ path: p, mode: "100644", type: "blob", sha: null });
+    manifest.stored = stored;
     const mblob = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content: utf8ToBase64(JSON.stringify(manifest)), encoding: "base64" }) }, "upload the manifest");
     tree.push({ path: "manifest.json", mode: "100644", type: "blob", sha: mblob.sha });
     const newTree = await this.api("/git/trees", { method: "POST", body: JSON.stringify({ base_tree: baseTree ?? undefined, tree }) }, "build the commit");
     const commit = await this.api("/git/commits", { method: "POST", body: JSON.stringify({ message: `Yuzu sync from ${device || "device"} (${toWrite.length} files)`, tree: newTree.sha, parents: baseCommit ? [baseCommit] : [] }) }, "create the commit");
     if (baseCommit) await this.api(`/git/refs/heads/${this.branch}`, { method: "PATCH", body: JSON.stringify({ sha: commit.sha, force: false }) }, "advance the branch");
     else await this.api("/git/refs", { method: "POST", body: JSON.stringify({ ref: `refs/heads/${this.branch}`, sha: commit.sha }) }, "create the branch");
-    return { manifest, commit: commit.sha, pushed: toWrite.length };
+    return { manifest, commit: commit.sha, pushed: toWrite.length, bytes };
   }
 }
 
@@ -260,8 +285,8 @@ export function mergeCards(local: Map<string, Card>, remote: Card[], tombs: Reco
   }
   return n;
 }
-export function mergeReviews(local: Review[], remote: Review[]): { list: Review[]; added: number } {
+export function mergeReviews(local: Review[], remote: Review[], tombs: Record<string, number> = {}): { list: Review[]; added: number } {
   const ids = new Set(local.map((r) => r.id));
-  const add = remote.filter((r) => !ids.has(r.id));
+  const add = remote.filter((r) => !ids.has(r.id) && !("r:" + r.id in tombs));
   return { list: add.length ? local.concat(add).sort((a, b) => a.ts - b.ts) : local, added: add.length };
 }

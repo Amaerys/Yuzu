@@ -3,14 +3,16 @@ import { store, type View } from "../lib/store";
 import type { Card, Rating } from "../lib/model";
 import { renderCard } from "../lib/render";
 import { previewIntervals, humanInterval, retrievability, DAY } from "../scheduler/fsrs";
-import { IconClose, IconUndo, IconFlag, IconPause, IconInfo } from "./icons";
+import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore } from "./icons";
+import { systemColor, stamp, tilt } from "./theme";
+import { useBack } from "./useBack";
 
 const BASE_CSS = `
 :host { display:block; }
-.card { font-size: 20px; line-height: 1.45; }
+.card { font-size: 20px; line-height: 1.45; font-family: inherit; }
 img { max-width: 100%; height: auto; border-radius: 8px; }
-hr#answer { border: 0; border-top: 1px solid #ddd; margin: 14px 0; }
-.night_mode hr#answer { border-top-color: #333; }
+hr#answer { border: 0; border-top: 2px dashed rgba(0,0,0,.18); margin: 16px -4px; }
+.night_mode hr#answer { border-top-color: rgba(255,255,255,.18); }
 .cloze { color: #ff7a1a; font-weight: 700; }
 .cloze-inactive { color: inherit; }
 .hint { color: #888; font-style: italic; }
@@ -20,7 +22,7 @@ hr#answer { border: 0; border-top: 1px solid #ddd; margin: 14px 0; }
 .night_mode .card, .card.night_mode { color: #f2f2f0; background: transparent; }
 `;
 
-function CardView({ html, css, dark }: { html: string; css: string; dark: boolean }) {
+export function CardView({ html, css, dark }: { html: string; css: string; dark: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const host = ref.current!;
@@ -32,6 +34,22 @@ function CardView({ html, css, dark }: { html: string; css: string; dark: boolea
   return <div ref={ref} className={"card-host" + (dark ? " dark" : "")} />;
 }
 
+/** The paper index card: system-colored spine, rubber-stamp state, a tiny per-card tilt, and the next card peeking out below. */
+export function Paper({ card, html, css, dark, children }: { card: Card; html: string; css: string; dark: boolean; children?: React.ReactNode }) {
+  const note = store.noteFor(card);
+  const system = note?.tags.find((t) => t.startsWith("auto::System::"))?.slice(14);
+  return (
+    <div className="paper-stage" style={{ "--spine": systemColor(system), "--tilt": `${tilt(card.id)}deg` } as any}>
+      <div className="paper-under" />
+      <div className={"paper" + (dark ? " slate" : "")}>
+        <span className="stamp">{stamp(card)}</span>
+        <CardView html={html} css={css} dark={dark} />
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function estimateSeconds(): number {
   const rs = store.reviews.slice(-200).map((r) => r.durationMs).filter((d) => d > 500 && d < 120000);
   if (rs.length < 10) return 9;
@@ -40,6 +58,7 @@ function estimateSeconds(): number {
 }
 
 function CardInfo({ card, onClose, onSaved }: { card: Card; onClose: () => void; onSaved: () => void }) {
+  useBack(true, onClose);
   const note = store.noteFor(card)!;
   const nt = store.notetypeFor(note)!;
   const [editing, setEditing] = useState(false);
@@ -99,17 +118,22 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
   const [drag, setDrag] = useState(0);
   const [typed, setTyped] = useState("");
   const [leech, setLeech] = useState<{ cardId: string; lapses: number } | null>(null);
+  const [menu, setMenu] = useState(false);
   const total = queue.length;
-  const card = queue[idx];
+  useBack(true, onExit);
+  const card = queue[idx] ? (store.cards.get(queue[idx].id) ?? queue[idx]) : undefined;
   const dark = store.settings.nightCards;
   const secs = useMemo(estimateSeconds, []);
 
+  // Learning cards from this session that became due again (rated Again/Hard minutes ago) come back
+  // at their due time, interleaved into what is left; the planned size is otherwise respected.
   useEffect(() => {
-    if (plan !== null && idx >= queue.length) {
-      const more = store.queue(path, Date.now(), view).filter((c) => !queue.some((q) => q.id === c.id));
-      if (more.length) { setQueue(more); setIdx(0); }
-    }
-  }, [idx, queue, path, view, plan]);
+    if (plan === null) return;
+    const now = Date.now(); const remaining = new Set(queue.slice(idx).map((c) => c.id));
+    const back = queue.slice(0, idx).map((c) => store.cards.get(c.id)!).filter((c) => c && !c.suspended && (c.state === "learning" || c.state === "relearning") && c.due <= now && !remaining.has(c.id));
+    if (!back.length) return;
+    setQueue((q) => { const seen = new Set(q.slice(idx).map((c) => c.id)); const add = back.filter((c) => !seen.has(c.id)); if (!add.length) return q; const at = Math.min(q.length, idx + 1); return [...q.slice(0, at), ...add, ...q.slice(at)]; });
+  }, [idx]);
 
   useEffect(() => { shownAt.current = Date.now(); setShowAnswer(false); setInfo(false); setTyped(""); }, [card?.id]);
 
@@ -143,17 +167,24 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
   const norm = (x: string) => x.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
   const typedOk = typed && answerText ? norm(typed) === norm(answerText) || norm(answerText).split(/[;,/]|\s-\s/).map((x) => x.trim()).includes(norm(typed)) : null;
 
+  const busy = useRef(false);
   async function answer(g: Rating) {
-    if (!card) return;
-    await store.answer(card.id, g, Date.now() - shownAt.current);
+    if (!card || busy.current) return;
+    busy.current = true;
+    try { await store.answer(card.id, g, Date.now() - shownAt.current); } finally { busy.current = false; }
     setDoneCount((d) => d + 1);
     if (store.lastAnswer?.leech && store.lastAnswer.cardId === card.id) setLeech({ cardId: card.id, lapses: store.lastAnswer.lapses });
     setIdx((i) => i + 1);
     if (navigator.vibrate) navigator.vibrate(g === 1 ? [30, 40, 30] : 12);
   }
   async function undo() {
-    if (await store.undoLast()) { setQueue(store.queue(path, Date.now(), view).slice(0, Math.max(1, (plan ?? 0) - doneCount + 1))); setIdx(0); setDoneCount((d) => Math.max(0, d - 1)); flash("Undone"); }
-    else flash("Nothing to undo");
+    const prev = await store.undoLast();
+    if (prev) {
+      // Show the undone card again, in place: it is still in the queue at idx-1 (or was inserted later as a lapse).
+      setQueue((q) => { const at = q.findIndex((c, i) => i < idx && c.id === prev.id); if (at >= 0) { const c = [...q]; c[at] = prev; return c; } return [prev, ...q.slice(idx)]; });
+      setIdx((i) => { const at = queue.findIndex((c, k) => k < i && c.id === prev.id); return at >= 0 ? at : 0; });
+      setDoneCount((d) => Math.max(0, d - 1)); flash("Undone");
+    } else flash("Nothing to undo");
   }
   function flash(msg: string) { setToast(msg); setTimeout(() => setToast(""), 1400); }
 
@@ -180,8 +211,8 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
             <div>cards ready · about {mins(fullQueue.length)} min</div>
             <p className="muted small">Based on your usual {secs}s per card. Pick how much to do now:</p>
             <div style={{ display: "grid", gap: 8, marginTop: 16 }}>
-              {options.map((n) => <button key={n} className={"btn block" + (n === fullQueue.length ? " primary" : "")} onClick={() => { setPlan(n); setQueue(fullQueue.slice(0, n)); }}>{n === fullQueue.length ? `All ${n} cards` : `${n} cards`} <span className="muted small">· {mins(n)} min</span></button>)}
-              {[10, 25].map((m) => <button key={m} className="btn block" onClick={() => { const n = byMin(m); setPlan(n); setQueue(fullQueue.slice(0, n)); }}>{m} minutes <span className="muted small">· {byMin(m)} cards</span></button>)}
+              {[10, 25].map((m) => <button key={m} className={"btn block" + (m === 25 ? " primary" : "")} onClick={() => { const n = byMin(m); setPlan(n); setQueue(fullQueue.slice(0, n)); }}>{m} minutes <span className="muted small">· {byMin(m)} cards</span></button>)}
+              {options.map((n) => <button key={n} className="btn block" onClick={() => { setPlan(n); setQueue(fullQueue.slice(0, n)); }}>{n === fullQueue.length ? `All ${n.toLocaleString()} cards` : `${n} cards`} <span className="muted small">· {mins(n)} min</span></button>)}
             </div>
           </div>
         </div>
@@ -215,21 +246,28 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
         <div className="progress"><i style={{ width: `${total ? (idx / total) * 100 : 0}%` }} /></div>
         <span className="small muted" style={{ minWidth: 56, textAlign: "right" }}>{idx}/{total}</span>
         <button className="icon-btn" onClick={undo} aria-label="Undo"><IconUndo /></button>
-        <button className="icon-btn" onClick={() => setInfo(true)} aria-label="Card info"><IconInfo /></button>
-        <button className={"icon-btn" + (card.flag ? " on" : "")} onClick={() => store.setFlag(card.id, card.flag ? 0 : 1)} aria-label="Flag"><IconFlag /></button>
-        <button className="icon-btn" onClick={async () => { await store.setSuspended(card.id, true); flash("Suspended"); setIdx((i) => i + 1); }} aria-label="Suspend"><IconPause /></button>
+        <button className={"icon-btn" + (menu ? " on" : "")} onClick={() => setMenu(!menu)} aria-label="More"><IconMore /></button>
       </div>
-      <div className="row small muted" style={{ padding: "0 14px 6px" }}>
-        <span className="chip">{card.state}</span>
-        <span className="grow" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{card.source.split("::").slice(-2).join(" › ")}</span>
+      {menu && (<>
+        <div style={{ position: "fixed", inset: 0, zIndex: 34 }} onClick={() => setMenu(false)} />
+        <div className="menu">
+          <button onClick={() => { setMenu(false); setInfo(true); }}><IconInfo /> Card info and edit</button>
+          <button onClick={() => { setMenu(false); store.setFlag(card.id, card.flag ? 0 : 1); }}><IconFlag /> {card.flag ? "Remove flag" : "Flag this card"}</button>
+          <button className="danger" onClick={async () => { setMenu(false); await store.setSuspended(card.id, true); flash("Paused — won't be shown again until unsuspended"); setIdx((i) => i + 1); }}><IconPause /> Pause this card</button>
+        </div>
+      </>)}
+      <div className="study-meta">
+        <span className="where">{card.source.split("::").slice(-2).join(" › ")}</span>
+        {card.flag ? <span className="chip orange" style={{ minHeight: 24, padding: "2px 8px" }}>flagged</span> : null}
       </div>
       <div className="study-body" onClick={() => !showAnswer && setShowAnswer(true)} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
         style={{ transform: drag ? `translateX(${drag * 0.4}px)` : undefined, transition: drag ? "none" : "transform .15s" }}>
         {drag < -40 && <div className="swipe-hint again">Again</div>}
         {drag > 40 && <div className="swipe-hint good">Good</div>}
-        {rendered && <CardView html={showAnswer ? rendered.back : rendered.front} css={rendered.css} dark={dark} />}
-        {typing && !showAnswer && <div style={{ padding: "0 14px 12px" }} onClick={(e) => e.stopPropagation()}><input className="typeans" autoFocus={false} placeholder="Type the answer, then Enter" value={typed} onChange={(e) => setTyped(e.target.value)} autoCapitalize="none" autoCorrect="off" /></div>}
-        {typing && showAnswer && typed && <div style={{ padding: "0 14px 12px" }}><span className={"chip " + (typedOk ? "yuzu" : "")} style={typedOk ? {} : { color: "var(--again)" }}>{typedOk ? "✓ " : "✗ "}{typed}{!typedOk && answerText ? ` → ${answerText}` : ""}</span></div>}
+        {rendered && <Paper card={card} html={showAnswer ? rendered.back : rendered.front} css={rendered.css} dark={dark}>
+          {typing && !showAnswer && <div style={{ marginTop: 12 }} onClick={(e) => e.stopPropagation()}><input className="typeans" autoFocus={false} placeholder="Type the answer, then Enter" value={typed} onChange={(e) => setTyped(e.target.value)} autoCapitalize="none" autoCorrect="off" /></div>}
+          {typing && showAnswer && typed && <div style={{ marginTop: 10 }}><span className="chip" style={{ background: typedOk ? "rgba(127,163,74,.2)" : "rgba(214,90,60,.18)", color: typedOk ? "#4e6e2a" : "#a33a22" }}>{typedOk ? "✓ " : "✗ "}{typed}{!typedOk && answerText ? ` → ${answerText}` : ""}</span></div>}
+        </Paper>}
       </div>
       {!showAnswer ? (
         <div className="show-bar"><button className="btn primary block" onClick={() => setShowAnswer(true)}>Show answer</button></div>

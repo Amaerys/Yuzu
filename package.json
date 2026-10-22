@@ -1,17 +1,26 @@
 {
   "name": "yuzu",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Yuzu \u2014 spaced-repetition flashcards for medicine and German, offline-first PWA with GitHub sync",
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --import tsx --test test/*.test.ts",
     "e2e": "node --import tsx test/e2e/run.ts && node --import tsx test/e2e/sync.ts",
-    "check": "npx tsc --noEmit -p . && npm test && npm run build && npm run e2e"
+    "check": "npx tsc --noEmit -p . && npm test && npm run build && npm run e2e",
+    "probe:real": "node --import tsx tools/probes/final.e2e.ts"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "license": "UNLICENSED",
   "type": "module",
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "esbuild": "^0.24",
+    "typescript": "^5.6",
+    "tsx": "^4.19",
+    "react": "^19.0",
+    "react-dom": "^19.0",
+    "@types/react": "^19.0",
+    "@types/react-dom": "^19.0",
+    "playwright": "^1.48",
+    "sharp": "^0.33"
+  }
 }

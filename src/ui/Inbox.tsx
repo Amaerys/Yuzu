@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { store } from "../lib/store";
 import { IconClose } from "./icons";
+import { useBack } from "./useBack";
 
 const clean = (s: string) => (s ?? "").replace(/\{\{c\d+::(.*?)(?:::[^}]*)?\}\}/g, "[$1]").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
@@ -51,6 +52,7 @@ export function Inbox({ onClose }: { onClose: () => void }) {
   const [open, setOpen] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
   store.getVersion();
+  useBack(true, () => (open ? setOpen(null) : onClose()));
   if (open) return <div className="screen"><div className="row"><h1 className="grow" style={{ margin: 0 }}>Review pack</h1><button className="icon-btn" aria-label="Back" onClick={() => setOpen(null)}><IconClose /></button></div><Review sha={open} onDone={() => setOpen(null)} /></div>;
   return (
     <div className="screen">

@@ -3,10 +3,12 @@ import { store, VIEWS, type TreeNode, type View, type SmartDeck } from "../lib/s
 import { noteTitle, renderCard } from "../lib/render";
 import { SYSTEM_NAMES } from "../lib/classify";
 import type { Card, CardState } from "../lib/model";
-import { IconChevron, IconPlay, IconClose, IconPin } from "./icons";
+import { IconChevron, IconPlay, IconClose, IconPin, IconEdit } from "./icons";
 import { useEffect, useRef } from "react";
 import { Duplicates } from "./Duplicates";
 import { bossPool, BOSS_PASS } from "./Boss";
+import { useBack } from "./useBack";
+import { systemColor } from "./theme";
 
 function findNode(root: TreeNode, path: string): TreeNode | null {
   if (!path) return root;
@@ -17,14 +19,15 @@ function findNode(root: TreeNode, path: string): TreeNode | null {
 }
 
 function Preview({ card, onClose }: { card: Card; onClose: () => void }) {
+  useBack(true, onClose);
   const note = store.noteFor(card)!; const nt = store.notetypeFor(note)!;
   const r = renderCard({ note, notetype: nt, ord: card.ord, deck: card.source, resolveMedia: store.mediaUrl });
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => { const h = ref.current!; const root = h.shadowRoot ?? h.attachShadow({ mode: "open" }); root.innerHTML = `<style>.card{font-size:17px;line-height:1.4;color:#f2f2f0} img{max-width:100%} .cloze{color:#ff7a1a;font-weight:700} hr#answer{border:0;border-top:1px solid #333;margin:10px 0}</style><style>${r.css}</style><div class="night_mode nightMode"><div class="card night_mode">${r.back}</div></div>`; }, [card.id]);
+  useEffect(() => { const h = ref.current!; const root = h.shadowRoot ?? h.attachShadow({ mode: "open" }); root.innerHTML = `<style>.card{font-size:17px;line-height:1.4;color:#efe7d6} img{max-width:100%} .cloze{color:#ff7a1a;font-weight:700} hr#answer{border:0;border-top:2px dashed rgba(255,255,255,.18);margin:10px 0}</style><style>${r.css}</style><div class="night_mode nightMode"><div class="card night_mode">${r.back}</div></div>`; }, [card.id]);
   return (
     <div className="sheet-backdrop" onClick={onClose}><div className="sheet" onClick={(e) => e.stopPropagation()}>
       <div className="row" style={{ marginBottom: 8 }}><b className="grow">Preview</b><span className="chip">{card.suspended ? "suspended" : card.state}</span><button className="icon-btn" aria-label="Close preview" onClick={onClose}><IconClose /></button></div>
-      <div ref={ref} className="card-host dark" />
+      <div ref={ref} className="paper slate" style={{ "--tilt": "0deg", "--spine": systemColor(note.tags.find((t) => t.startsWith("auto::System::"))?.slice(14)) } as any} />
       <p className="small muted">{card.source}{note.tags.length ? " · " + note.tags.filter((t) => !t.startsWith("auto::")).join(", ") : ""}</p>
       <div className="row"><button className="btn grow" onClick={async () => { await store.setSuspended(card.id, !card.suspended); onClose(); }}>{card.suspended ? "Unsuspend" : "Suspend"}</button><button className="btn grow" onClick={async () => { await store.setFlag(card.id, card.flag ? 0 : 1); onClose(); }}>{card.flag ? "Unflag" : "Flag"}</button></div>
     </div></div>
@@ -62,11 +65,16 @@ export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: Vie
   const [path, setPath] = useState("");
   const [showCards, setShowCards] = useState(false);
   const [query, setQuery] = useState("");
+  const [q, setQ] = useState(""); // debounced
+  useEffect(() => { const t = setTimeout(() => setQ(query.trim().toLowerCase()), 160); return () => clearTimeout(t); }, [query]);
+  const [sort, setSort] = useState<"due" | "new" | "state" | "deck">("due");
+  const [allTags, setAllTags] = useState(false);
   const [preview, setPreview] = useState<Card | null>(null);
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [editSmart, setEditSmart] = useState<SmartDeck | null | "new">(null);
   const [moveTo, setMoveTo] = useState<string | null>(null);
+  const [tagTo, setTagTo] = useState<string | null>(null);
   const [tool, setTool] = useState<"dupes" | null>(null);
   const [rename, setRename] = useState<string | null>(null);
   const [classify, setClassify] = useState<"System" | "Specialty" | null>(null);
@@ -85,28 +93,30 @@ export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: Vie
     return { due, learning, fresh, susp, studied, total: scopeCards.length };
   }, [scopeCards]);
 
-  const list = useMemo(() => {
-    if (!showCards && !query) return [];
-    const q = query.trim().toLowerCase();
-    const seen = new Set<string>();
-    const out: { card: Card; title: string; state: string }[] = [];
+  const matches = useMemo(() => {
+    if (!showCards && !q) return [] as Card[];
+    const index = q ? store.searchIndex() : null;
+    const seen = new Set<string>(); const out: Card[] = [];
     for (const c of scopeCards) {
       if (seen.has(c.nid)) continue;
-      const n = store.noteFor(c); if (!n) continue;
-      const title = noteTitle(n, store.notetypeFor(n));
-      if (q && !title.toLowerCase().includes(q) && !n.tags.some((t) => t.toLowerCase().includes(q))) continue;
-      seen.add(c.nid);
-      out.push({ card: c, title, state: c.suspended ? "suspended" : c.state });
-      if (out.length >= 300) break;
+      if (index && !(index.get(c.nid) ?? "").includes(q)) continue;
+      seen.add(c.nid); out.push(c);
     }
+    const order = { learning: 0, relearning: 0, review: 1, new: 2 } as Record<string, number>;
+    if (sort === "due") out.sort((a, b) => (a.state === "new" ? 1 : 0) - (b.state === "new" ? 1 : 0) || a.due - b.due);
+    else if (sort === "new") out.sort((a, b) => b.created - a.created);
+    else if (sort === "state") out.sort((a, b) => (a.suspended ? 3 : order[a.state]) - (b.suspended ? 3 : order[b.state]));
+    else out.sort((a, b) => a.source.localeCompare(b.source));
     return out;
-  }, [scopeCards, showCards, query]);
+  }, [scopeCards, showCards, q, sort]);
+  const list = useMemo(() => matches.slice(0, 300).map((c) => { const n = store.noteFor(c)!; return { card: c, title: noteTitle(n, store.notetypeFor(n)), state: c.suspended ? "suspended" : c.state }; }), [matches]);
 
   if (store.cards.size === 0) {
     return (<div className="screen"><h1>Library</h1><div className="empty">No cards yet. Import your Anki collection from Settings.</div></div>);
   }
 
   const go = (p: string) => { setPath(p); setShowCards(false); setSelecting(false); setSelected(new Set()); };
+  useBack(!!path, () => go(path.split("::").slice(0, -1).join("::")));
   const doBulk = async (action: Parameters<typeof store.bulk>[1]) => { await store.bulk([...selected], action); setSelected(new Set()); setSelecting(false); };
   const title = view === "smart" ? (smart?.name ?? "Smart decks") : node!.name;
   if (tool === "dupes") return <Duplicates onClose={() => setTool(null)} />;
@@ -139,45 +149,53 @@ export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: Vie
                 <div style={{ fontWeight: 700, fontSize: 18 }}>{title}</div>
                 <div className="small muted">{counts.total.toLocaleString()} cards · {counts.susp.toLocaleString()} suspended · {counts.studied.toLocaleString()} studied</div>
               </div>
-              {view === "decks" && path && <button className="icon-btn" aria-label="Rename or move" title="Rename or move this category" onClick={() => setRename(path)}>✎</button>}
+              {view === "decks" && path && <button className="icon-btn" aria-label="Rename or move" title="Rename or move this category" onClick={() => setRename(path)}><IconEdit /></button>}
               <button className={"icon-btn" + (pinned ? " on" : "")} aria-label="Pin" onClick={() => store.saveSettings({ pins: pinned ? store.settings.pins.filter((p) => !(p.view === view && p.path === path)) : [...store.settings.pins, { view, path }] })}><IconPin /></button>
               <button className="btn primary" onClick={() => onStudy(path, view)} disabled={counts.due + counts.fresh + counts.learning === 0}><IconPlay /> Study</button>
             </div>
             <div className="row small" style={{ marginTop: 10, gap: 14 }}>
-              <span className="c-due">{counts.due} due</span><span className="c-learn">{counts.learning} learning</span><span className="c-new">{counts.fresh} new</span>
+              <span><b className="c-due">{counts.due.toLocaleString()}</b> due</span><span><b className="c-learn">{counts.learning}</b> learning</span><span><b>{counts.fresh.toLocaleString()}</b> new</span>
               {smart && <button className="chip" style={{ marginLeft: "auto" }} onClick={() => setEditSmart(smart)}>Edit</button>}
             </div>
             {view !== "smart" && path && (() => { const pool = bossPool(path, view).length; const b = store.settings.bosses[`${view}:${path}`]; return pool >= 10 ? (
               <div className="row small" style={{ marginTop: 10 }}>
-                <button className="chip yuzu" onClick={() => onBoss(path, view, title)}>⚔ Boss fight</button>
+                <button className="chip yuzu" onClick={() => onBoss(path, view, title)}>Boss fight</button>
                 <span className="muted">{b ? `best ${Math.round(b.best * 100)}%${b.passed ? " · defeated" : ""}` : `${pool} well-learned cards, 20 random, no hints, ${Math.round(BOSS_PASS * 100)}% to pass`}</span>
               </div>) : null; })()}
           </div>
           <div className="field"><input placeholder="Search cards and tags here" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
           {!query && node && node.children.length > 0 && (
             <>
-              <h2>Categories</h2>
-              {node.children.map((c) => (
+              <h2>{view === "tags" ? "Tags" : "Categories"}</h2>
+              {view === "tags" && !path && <label className="row small muted" style={{ marginBottom: 6 }}><input type="checkbox" checked={allTags} onChange={(e) => setAllTags(e.target.checked)} /> Show deck housekeeping tags (#, !)</label>}
+              {[...node.children].filter((c) => view !== "tags" || allTags || !/^[#!~]/.test(c.name)).sort((a, b) => (["Other", "Unclassified", "No exam", "Untagged"].includes(a.name) ? 1 : 0) - (["Other", "Unclassified", "No exam", "Untagged"].includes(b.name) ? 1 : 0)).map((c) => (
                 <button key={c.path} className="tree-row" style={{ width: "100%", textAlign: "left" }} onClick={() => go(c.path)}>
-                  <span className="name">{c.name}</span>
-                  <span className="counts"><span className="c-due">{c.due}</span><span className="c-learn">{c.learning}</span><span className="c-new">{c.newCount}</span></span>
+                  <span className="name">{view === "systems" && !path && <i style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: systemColor(c.name), marginRight: 8, verticalAlign: "1px" }} />}{c.name}</span>
+                  <span className="counts">{c.due ? <span><b className="c-due">{c.due.toLocaleString()}</b> due</span> : null}{c.learning ? <span><b className="c-learn">{c.learning}</b> learning</span> : null}{c.newCount ? <span><b>{c.newCount.toLocaleString()}</b> new</span> : null}</span>
                   <span className="muted"><IconChevron /></span>
                 </button>
               ))}
             </>
           )}
+          {!query && node && node.children.length === 0 && view !== "decks" && path && (() => {
+            const by = new Map<string, { due: number; fresh: number; total: number }>(); const now = Date.now();
+            for (const c of scopeCards) { if (c.suspended) continue; const k = c.source.split("::").slice(0, 3).join(" › "); const e = by.get(k) ?? by.set(k, { due: 0, fresh: 0, total: 0 }).get(k)!; e.total++; if (c.state === "new") e.fresh++; else if (c.due <= now) e.due++; }
+            const rows = [...by].sort((a, b) => b[1].total - a[1].total).slice(0, 12);
+            return rows.length > 1 ? (<><h2>Where these cards live</h2>{rows.map(([k, e]) => <div key={k} className="tree-row"><span className="name" style={{ fontWeight: 500 }}>{k}</span><span className="counts">{e.due ? <span><b className="c-due">{e.due.toLocaleString()}</b> due</span> : null}<span><b>{e.total.toLocaleString()}</b> cards</span></span></div>)}</>) : null;
+          })()}
           {!query && !showCards && <button className="btn ghost block" style={{ marginTop: 12 }} onClick={() => setShowCards(true)}>Show cards in {title}</button>}
           {(showCards || query) && (
             <>
               <div className="row" style={{ marginTop: 18 }}>
-                <h2 className="grow" style={{ margin: 0 }}>Cards {list.length >= 300 ? "(first 300)" : `(${list.length})`}</h2>
+                <h2 className="grow" style={{ margin: 0 }}>{matches.length.toLocaleString()} cards{matches.length > 300 ? ", first 300 shown" : ""}</h2>
+                <select className="chip" value={sort} onChange={(e) => setSort(e.target.value as any)} aria-label="Sort"><option value="due">by due</option><option value="new">newest</option><option value="state">by state</option><option value="deck">by deck</option></select>
                 <button className="chip" onClick={() => { setSelecting(!selecting); setSelected(new Set()); }}>{selecting ? "Cancel" : "Select"}</button>
-                {selecting && <button className="chip" onClick={() => setSelected(new Set(list.map((r) => r.card.id)))}>All</button>}
+                {selecting && <button className="chip" onClick={() => setSelected(new Set(matches.map((c) => c.id)))}>All {matches.length.toLocaleString()}</button>}
               </div>
               {list.map((r) => (
                 <button key={r.card.id} className="list-row" style={{ width: "100%", textAlign: "left" }} onClick={() => { if (selecting) { const s = new Set(selected); s.has(r.card.id) ? s.delete(r.card.id) : s.add(r.card.id); setSelected(s); } else setPreview(r.card); }}>
                   {selecting && <input type="checkbox" readOnly checked={selected.has(r.card.id)} />}
-                  <span className="t">{r.title}</span><span className={"chip " + (r.state === "new" ? "" : "orange")}>{r.state}</span>
+                  <span className="t">{r.title}<div className="small muted" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{r.card.source.split("::").slice(-2).join(" › ")}</div></span><span className={"chip " + (r.state === "new" ? "" : "orange")}>{r.state}</span>
                 </button>
               ))}
             </>
@@ -190,11 +208,18 @@ export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: Vie
           <button className="btn" onClick={() => doBulk({ suspended: true })}>Suspend</button>
           <button className="btn" onClick={() => doBulk({ suspended: false })}>Unsuspend</button>
           <button className="btn" onClick={() => doBulk({ flag: 1 })}>Flag</button>
-          <button className="btn" onClick={() => { const t = prompt("Tag to add (use :: for hierarchy)"); if (t) doBulk({ addTag: t.trim().replace(/\s+/g, "_") }); }}>Tag</button>
+          <button className="btn" onClick={() => setTagTo("")}>Tag</button>
           <button className="btn" onClick={() => setMoveTo("")}>Move</button>
           <button className="btn" onClick={() => setClassify("System")}>System</button>
           <button className="btn" onClick={() => setClassify("Specialty")}>Specialty</button>
         </div>
+      )}
+      {tagTo !== null && (
+        <div className="sheet-backdrop" onClick={() => setTagTo(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>
+          <b>Tag {selected.size} cards</b>
+          <div className="field"><label>Tag (use :: for levels)</label><input value={tagTo} onChange={(e) => setTagTo(e.target.value)} placeholder="step1::high-yield" autoCapitalize="none" /></div>
+          <button className="btn primary block" disabled={!tagTo.trim()} onClick={async () => { await doBulk({ addTag: tagTo.trim().replace(/\s+/g, "_") }); setTagTo(null); }}>Add tag</button>
+        </div></div>
       )}
       {moveTo !== null && (
         <div className="sheet-backdrop" onClick={() => setMoveTo(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>

@@ -3,6 +3,7 @@ import { store } from "../lib/store";
 import { noteTitle } from "../lib/render";
 import type { Note } from "../lib/model";
 import { IconClose } from "./icons";
+import { useBack } from "./useBack";
 
 function NoteCard({ note, label, onKeep }: { note: Note; label: string; onKeep: () => void }) {
   const cards = store.cardsOfNote(note.id);
@@ -27,6 +28,7 @@ export function Duplicates({ onClose }: { onClose: () => void }) {
   const pairs = useMemo(() => store.similarPairs(), [v]);
   const [i, setI] = useState(0);
   const [showLog, setShowLog] = useState(false);
+  useBack(true, onClose);
   const pair = pairs[Math.min(i, pairs.length - 1)];
   const a = pair ? store.notes.get(pair[0]) : undefined, b = pair ? store.notes.get(pair[1]) : undefined;
   return (

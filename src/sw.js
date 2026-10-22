@@ -37,7 +37,7 @@ self.addEventListener("fetch", (event) => {
         return Response.error();
       }
     })());
-  } else if (/cdn\.jsdelivr\.net/.test(url.host)) {
+  } else if (/cdn\.jsdelivr\.net|fonts\.googleapis\.com|fonts\.gstatic\.com/.test(url.host)) {
     event.respondWith((async () => {
       const cache = await caches.open(RUNTIME);
       const hit = await cache.match(req);

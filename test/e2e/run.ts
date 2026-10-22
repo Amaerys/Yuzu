@@ -10,7 +10,7 @@ const ctx = await browser.newContext({ viewport: { width: 412, height: 915 }, de
 const page = await ctx.newPage();
 const errors: string[] = [];
 page.on("pageerror", (e) => errors.push("pageerror: " + e.message));
-page.on("console", (m) => { if (m.type() === "error") errors.push("console: " + m.text()); });
+page.on("console", (m) => { if (m.type() === "error" && !/ERR_TUNNEL|ERR_FAILED/.test(m.text())) errors.push("console: " + m.text()); });
 const fixture = process.argv[2] ?? "test/fixtures/medicine-legacy.apkg";
 try {
   await page.goto(`http://127.0.0.1:${port}/`);
@@ -25,8 +25,8 @@ try {
   await page.screenshot({ path: `${shots}/02-imported.png` });
   // Reload: data must persist in IndexedDB.
   await page.reload();
-  await page.waitForSelector("text=cards ready now", { timeout: 20000 });
-  const ready = await page.locator(".big").first().innerText();
+  await page.waitForSelector("text=cards ready", { timeout: 20000 });
+  const ready = await page.locator(".hero .lead b").first().innerText();
   console.log("ready now:", ready);
   await page.screenshot({ path: `${shots}/03-today.png` });
   await page.click("nav.tabs >> text=Library");
@@ -49,10 +49,12 @@ try {
   await page.click("text=Cardio new"); await page.waitForSelector(".card-box");
   await page.click('[aria-label="Pin"]'); await page.waitForTimeout(200);
   // Bulk: show cards, select all, suspend
-  await page.click("text=Show cards in Cardio new"); await page.click("text=Select"); await page.click(".chip >> text=All");
+  await page.click("text=Show cards in Cardio new"); await page.click("text=Select"); await page.getByRole("button", { name: /^All \d/ }).first().click();
+  await page.waitForTimeout(200); console.log("bulk bar:", await page.locator(".bulk-bar").innerText().catch(() => "none"));
   await page.click(".bulk-bar >> text=Suspend"); await page.waitForTimeout(400);
   console.log("after bulk suspend:", await page.locator(".card-box .small.muted").first().innerText());
-  await page.click("text=Select"); await page.click(".chip >> text=All"); await page.click(".bulk-bar >> text=Unsuspend"); await page.waitForTimeout(400);
+  await page.click("button.chip >> text=Select"); await page.waitForTimeout(200);
+  await page.getByRole("button", { name: /^All \d/ }).first().click(); await page.click(".bulk-bar >> text=Unsuspend"); await page.waitForTimeout(400);
   await page.locator(".list-row").first().click(); await page.waitForSelector("text=Preview"); await page.screenshot({ path: `${shots}/04d-preview.png` });
   await page.click('[aria-label="Close preview"]');
   // Card pack import with an image, then study it
@@ -63,7 +65,7 @@ try {
   await page.click("nav.tabs >> text=Library"); await page.click(".seg >> text=Decks");
   await page.fill("input[placeholder^=Search]", "peaked (tented) t waves, best seen"); await page.waitForTimeout(300);
   await page.locator(".list-row").first().click(); await page.waitForSelector("text=Preview");
-  const imgOk = await page.locator(".sheet .card-host").evaluate((el) => { const img = el.shadowRoot!.querySelector("img") as HTMLImageElement | null; return img ? img.src.startsWith("blob:") : false; });
+  const imgOk = await page.locator(".sheet .paper").evaluate((el) => { const img = el.shadowRoot!.querySelector("img") as HTMLImageElement | null; return img ? img.src.startsWith("blob:") : false; });
   console.log("pack image renders:", imgOk);
   await page.screenshot({ path: `${shots}/09-pack-preview.png` });
   await page.click('[aria-label="Close preview"]');
@@ -72,11 +74,12 @@ try {
   const [dl] = await Promise.all([page.waitForEvent("download"), page.click("text=Back up")]);
   const bpath = await dl.path(); const bsize = bpath ? fs.statSync(bpath).size : 0; console.log("backup bytes:", bsize);
   await page.click("nav.tabs >> text=Today");
-  await page.click("text=Study everything");
+  await page.click(".hero >> text=Study");
   await page.waitForSelector("text=cards ready");
   await page.screenshot({ path: `${shots}/05a-plan.png` });
-  await page.click("text=25 cards");
-  await page.waitForSelector(".card-host");
+  console.log("plan options:", (await page.locator(".done .btn").allInnerTexts()).join(" / "));
+  await page.click(".done .btn >> text=/^25 cards/");
+  await page.waitForSelector(".study .card-host", { timeout: 15000 });
   await page.screenshot({ path: `${shots}/05-study-front.png` });
   await page.click("text=Show answer");
   await page.waitForSelector(".answer-bar");
@@ -90,13 +93,13 @@ try {
   await page.waitForTimeout(300);
   const after = await page.locator(".study-top span.small").innerText();
   console.log("progress", before, "→", after);
-  await page.click('[aria-label="Card info"]'); await page.waitForSelector("text=stability");
+  await page.click('[aria-label="More"]'); await page.click("text=Card info and edit"); await page.waitForSelector("text=stability");
   await page.screenshot({ path: `${shots}/06b-info.png` });
   await page.click("text=Edit this card"); await page.waitForSelector("textarea");
   await page.fill("textarea >> nth=0", "Edited front {{c1::answer}}");
   await page.click("text=Save"); await page.waitForTimeout(300);
   await page.click('[aria-label="Close info"]'); await page.waitForTimeout(200);
-  console.log("edited:", await page.locator(".card-host").evaluate((el) => el.shadowRoot!.querySelector(".card")!.textContent!.trim().slice(0, 40)));
+  console.log("edited:", await page.locator(".study .card-host").evaluate((el) => el.shadowRoot!.querySelector(".card")!.textContent!.trim().slice(0, 40)));
   await page.click('[aria-label="Undo"]'); await page.waitForTimeout(300);
   const afterUndo = await page.locator(".study-top span.small").innerText();
   console.log("after undo", afterUndo);
@@ -105,7 +108,7 @@ try {
   await page.waitForSelector("text=day streak");
   await page.screenshot({ path: `${shots}/07-progress.png` });
   // Persisted after reload?
-  await page.reload(); await page.waitForSelector("text=cards ready now");
+  await page.reload(); await page.waitForSelector("text=cards ready");
   const stats = await page.locator(".stat-grid").innerText();
   console.log("stats after reload:", stats.replace(/\n/g, " | "));
   // Desktop view

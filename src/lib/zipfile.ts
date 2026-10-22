@@ -1,6 +1,7 @@
 // Streaming ZIP reader over a Blob/File: reads the central directory from the tail and each entry
 // on demand with slice(), so a multi-gigabyte deck package never has to fit in memory.
-import type { Inflate, ZipEntry } from "./zip";
+export type Inflate = (data: Uint8Array) => Promise<Uint8Array>;
+export interface ZipEntry { name: string; method: number; compressedSize: number; uncompressedSize: number; localHeaderOffset: number }
 
 const SIG_LOCAL = 0x04034b50;
 

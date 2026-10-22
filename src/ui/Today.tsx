@@ -1,10 +1,12 @@
 import { store, type View } from "../lib/store";
-import { YuzuMark, IconPlay, IconFlame } from "./icons";
+import { YuzuMark, IconPlay } from "./icons";
 import { DAY } from "../scheduler/fsrs";
+import { systemColor } from "./theme";
+import { useMemo } from "react";
 
 /** A yuzu cut in half: 8 segments fill as the daily goal is reached. */
-export function YuzuGoal({ value, max, size = 104 }: { value: number; max: number; size?: number }) {
-  const segs = 8, cx = 52, cy = 52, R = 44, r0 = 10, gap = 0.06;
+export function YuzuGoal({ value, max, size = 104, center, sub }: { value: number; max: number; size?: number; center?: string | number; sub?: string }) {
+  const segs = 8, cx = 52, cy = 52, R = 46, r0 = center !== undefined ? 24 : 10, gap = 0.05;
   const frac = Math.min(1, max ? value / max : 0);
   const filled = frac * segs;
   const wedge = (i: number) => {
@@ -14,18 +16,26 @@ export function YuzuGoal({ value, max, size = 104 }: { value: number; max: numbe
   };
   return (
     <svg width={size} height={size} viewBox="0 0 104 104" className="ring" aria-label={`${value} of ${max}`}>
-      <circle cx={cx} cy={cy} r={50} fill="#2a2415" stroke="#d9b93a" strokeWidth="3" />
+      <circle cx={cx} cy={cy} r={51} fill="#2b2412" stroke="#d9b93a" strokeWidth="2.5" />
       {Array.from({ length: segs }, (_, i) => {
         const f = Math.max(0, Math.min(1, filled - i));
-        return <path key={i} d={wedge(i)} fill={f >= 1 ? "var(--yuzu)" : f > 0 ? "var(--orange)" : "#3a3320"} opacity={f > 0 && f < 1 ? 0.5 + f * 0.5 : 1} />;
+        return <path key={i} d={wedge(i)} fill={f >= 1 ? "var(--yuzu)" : f > 0 ? "var(--orange)" : "#3b3220"} opacity={f > 0 && f < 1 ? 0.5 + f * 0.5 : 1} />;
       })}
       <circle cx={cx} cy={cy} r={r0 - 2} fill="#1a160a" />
-      <text x={cx} y={cy + 4} textAnchor="middle" fontSize="11" fontWeight="700" fill="var(--text)">{Math.round(frac * 100)}%</text>
+      {center !== undefined
+        ? <><text x={cx} y={cy + (sub ? 2 : 5)} textAnchor="middle" fontSize={String(center).length > 3 ? "13" : "16"} fontWeight="800" fill="var(--text)" style={{ fontVariationSettings: '"wdth" 85' }}>{center}</text>{sub && <text x={cx} y={cy + 13} textAnchor="middle" fontSize="7.5" fill="var(--muted)">{sub}</text>}</>
+        : <text x={cx} y={cy + 4} textAnchor="middle" fontSize="11" fontWeight="700" fill="var(--text)">{Math.round(frac * 100)}%</text>}
     </svg>
   );
 }
 
 export function Today({ onStudy, onInbox }: { onStudy: (path: string, view?: View) => void; onInbox?: () => void }) {
+  const v = store.getVersion();
+  const d = useMemo(() => derive(), [v]);
+  return <TodayView {...d} onStudy={onStudy} onInbox={onInbox} />;
+}
+
+function derive() {
   const pins = store.settings.pins.map((p) => {
     const cards = store.cardsIn(p.path, p.view); const now = Date.now();
     const name = p.view === "smart" ? (store.settings.smart.find((s) => s.id === p.path)?.name ?? "Smart deck") : (p.path.split("::").pop() || "All");
@@ -43,57 +53,54 @@ export function Today({ onStudy, onInbox }: { onStudy: (path: string, view?: Vie
   });
   const maxF = Math.max(1, ...forecast);
   const top = tree.children.filter((c) => c.due + c.newCount + c.learning > 0).sort((a, b) => b.due - a.due).slice(0, 6);
+  return { pins, tree, stats, queue, counts, now, forecast, maxF, top };
+}
 
+function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, top, onStudy, onInbox }: ReturnType<typeof derive> & { onStudy: (path: string, view?: View) => void; onInbox?: () => void }) {
   return (
     <div className="screen">
       <div className="row" style={{ marginBottom: 6 }}><YuzuMark /><h1 style={{ margin: 0 }}>Yuzu</h1><div className="grow" />
         {store.syncConfigured() && <span className={"chip" + (store.syncStatus.state === "error" ? "" : " yuzu")} title={store.syncStatus.message} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "syncing…" : store.syncStatus.state === "error" ? "sync failed" : store.hasUnsynced() ? "unsynced" : "synced"}</span>}
-        <span className="chip orange"><IconFlame /> {stats.streak} day{stats.streak === 1 ? "" : "s"}</span>
       </div>
       {store.inbox.length > 0 && onInbox && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginBottom: 10, borderColor: "var(--yuzu)" }} onClick={onInbox}><span className="grow"><b>{store.inbox.length} new pack{store.inbox.length === 1 ? "" : "s"} from Claude</b><div className="small muted">Review the cards before they join your collection</div></span><span className="chip yuzu">Review</span></button>}
       {store.cards.size === 0 ? (
         <div className="card-box"><div style={{ fontWeight: 700, marginBottom: 6 }}>Nothing to study yet</div><div className="muted small">Go to Settings and import your Anki collection. Review history comes with it, so nothing starts over.</div></div>
       ) : (
         <>
-          <div className="card-box hero">
+          <div className="hero">
+            <YuzuGoal value={stats.today} max={stats.goal} size={150} center={queue.length} sub="ready" />
             <div>
-              <div className="big">{queue.length}</div>
-              <div className="muted">cards ready now</div>
-              <div className="row small" style={{ marginTop: 8, gap: 12 }}>
-                <span className="c-due">{tree.due} due</span><span className="c-learn">{tree.learning} learning</span><span className="c-new">{Math.min(tree.newCount, Math.max(0, store.settings.newPerDay - store.reviewedToday().newCards))} new</span>
-              </div>
-              <button className="btn primary" style={{ marginTop: 14 }} onClick={() => onStudy("")} disabled={queue.length === 0}><IconPlay /> Study everything</button>
+              <div className="lead"><b>{queue.length.toLocaleString()} cards</b> ready: {tree.due.toLocaleString()} due, {tree.learning} learning and {Math.min(tree.newCount, Math.max(0, store.settings.newPerDay - store.reviewedToday().newCards))} new for today.</div>
+              <div className="lead" style={{ marginTop: 6 }}>Goal <b>{stats.today} / {stats.goal}</b>{stats.today >= stats.goal ? ", done for today" : ""}.</div>
+              <button className="btn primary" style={{ marginTop: 14 }} onClick={() => onStudy("")} disabled={queue.length === 0}><IconPlay /> Study</button>
             </div>
-            <div style={{ textAlign: "center" }}><YuzuGoal value={stats.today} max={stats.goal} /><div className="small muted">{stats.today} / {stats.goal}</div></div>
           </div>
           <div className="stat-grid">
-            <div className="stat"><b>Lv {stats.level}</b><span>{stats.xp - stats.levelFloor} / {stats.levelCeil - stats.levelFloor} XP</span></div>
-            <div className="stat"><b>+{stats.todayXp}</b><span>XP today</span></div>
+            <div className="stat"><b>{stats.streak}</b><span>day streak</span></div>
+            <div className="stat"><b>{stats.today}</b><span>reviews today</span></div>
             <div className="stat"><b>{counts.review.toLocaleString()}</b><span>cards learned</span></div>
           </div>
           <h2>Next 7 days</h2>
-          <div className="card-box" style={{ display: "flex", gap: 6, alignItems: "flex-end", height: 90 }}>
+          <div className="card-box forecast" style={{ height: 108 }}>
             {forecast.map((n, i) => (
-              <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                <span className="small muted">{n}</span>
-                <div style={{ width: "100%", height: Math.max(3, (n / maxF) * 48), background: i === 0 ? "var(--orange)" : "var(--bg-3)", borderRadius: 4 }} />
+              <div key={i} className={i === 0 ? "today" : ""}>
+                <span className="small muted num">{n.toLocaleString()}</span>
+                <i style={{ height: Math.max(3, (n / maxF) * 44) }} />
                 <span className="small muted">{i === 0 ? "today" : new Date(now + i * DAY).toLocaleDateString(undefined, { weekday: "short" })}</span>
               </div>
             ))}
           </div>
           {pins.length > 0 && (<><h2>Pinned</h2>
             {pins.map((p) => (
-              <button key={p.view + p.path} className="tree-row" style={{ width: "100%", textAlign: "left" }} onClick={() => onStudy(p.path, p.view)}>
-                <span className="name">{p.name} <span className="small muted">{p.view}</span></span>
-                <span className="counts"><span className="c-due">{p.due}</span><span className="c-new">{p.fresh}</span></span>
+              <button key={p.view + p.path} className="stack" style={{ "--spine": p.view === "systems" ? systemColor(p.name) : "var(--orange)" } as any} onClick={() => onStudy(p.path, p.view)}>
+                <span className="name">{p.name}<div className="meta">{p.due.toLocaleString()} due · {p.fresh.toLocaleString()} new</div></span>
                 <span className="muted"><IconPlay /></span>
               </button>
             ))}</>)}
           {top.length > 0 && (<><h2>By category</h2>
             {top.map((c) => (
-              <button key={c.path} className="tree-row" style={{ width: "100%", textAlign: "left" }} onClick={() => onStudy(c.path)}>
-                <span className="name">{c.name}</span>
-                <span className="counts"><span className="c-due">{c.due}</span><span className="c-learn">{c.learning}</span><span className="c-new">{c.newCount}</span></span>
+              <button key={c.path} className="stack" style={{ "--spine": "var(--yuzu)" } as any} onClick={() => onStudy(c.path)}>
+                <span className="name">{c.name}<div className="meta">{c.due.toLocaleString()} due · {c.learning} learning · {c.newCount.toLocaleString()} new</div></span>
                 <span className="muted"><IconPlay /></span>
               </button>
             ))}</>)}

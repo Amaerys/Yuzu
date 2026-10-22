@@ -1,7 +1,7 @@
 // Anki package importer (.colpkg / .apkg), media-free.
 // Supports the modern format (collection.anki21b, zstd + protobuf tables) and the legacy
 // formats (collection.anki21 / collection.anki2, JSON in the col table).
-import { listZip, readZipEntry, type Inflate } from "../lib/zip";
+import { ZipFile, type Inflate } from "../lib/zipfile";
 import { SqliteReader, type Row } from "../lib/sqlite";
 import { decodeProto, protoInt, protoString } from "../lib/proto";
 import type { Card, CardState, ImportSummary, Note, Notetype, Rating, Review, Template } from "../lib/model";
@@ -28,12 +28,12 @@ const mediaRe = /<img[^>]+src=["']([^"']+)["']|\[sound:([^\]]+)\]/gi;
 
 export async function openAnkiPackage(bytes: Uint8Array, env: ImportEnv): Promise<{ db: SqliteReader; format: ImportSummary["format"] }> {
   env.onProgress?.("Reading package");
-  const entries = listZip(bytes);
-  const byName = new Map(entries.map((e) => [e.name, e]));
+  const zip = new ZipFile(new Blob([bytes as BlobPart]), env.inflateRaw);
+  const byName = new Map((await zip.list()).map((e) => [e.name, e]));
   const modern = byName.get("collection.anki21b");
   if (modern) {
     if (!env.zstd) throw new Error("This export uses the new Anki format (zstd). Tick 'Support older Anki versions' when exporting, or import while online.");
-    const packed = await readZipEntry(bytes, modern, env.inflateRaw);
+    const packed = await zip.read(modern);
     env.onProgress?.("Decompressing collection");
     const sqlite = await env.zstd(packed);
     return { db: new SqliteReader(sqlite), format: "anki21b" };
@@ -41,7 +41,7 @@ export async function openAnkiPackage(bytes: Uint8Array, env: ImportEnv): Promis
   const legacy = byName.get("collection.anki21") ?? byName.get("collection.anki2");
   if (!legacy) throw new Error("No collection found inside the file. Is this an Anki .apkg or .colpkg?");
   env.onProgress?.("Decompressing collection");
-  const sqlite = await readZipEntry(bytes, legacy, env.inflateRaw);
+  const sqlite = await zip.read(legacy);
   return { db: new SqliteReader(sqlite), format: legacy.name === "collection.anki21" ? "anki21" : "anki2" };
 }
 
@@ -97,8 +97,11 @@ function readDecks(db: SqliteReader): Map<string, string> {
   return out;
 }
 
+const tagCase = new Map<string, string>();
+/** Anki tags are case-insensitive: fold spellings onto the first one seen so "#AK_Step1_v12" and "#AK_Step1_V12" are one tag. */
 export function normalizeTag(t: string): string {
-  return t.trim().replace(/\s+/g, "_");
+  const x = t.trim().replace(/\s+/g, "_"); const k = x.toLowerCase();
+  const seen = tagCase.get(k); if (seen) return seen; tagCase.set(k, x); return x;
 }
 
 export async function importAnki(bytes: Uint8Array, env: ImportEnv, opts: { skipDeckPrefixes?: string[] } = {}): Promise<ImportResult> {

@@ -36,7 +36,6 @@ export function escapeHtml(s: string): string {
 
 function renderTemplate(tmpl: string, ctx: RenderCtx, side: "q" | "a", frontHtml?: string): string {
   const fields = fieldMap(ctx);
-  const hasCloze = (name: string) => ctx.notetype.kind === "cloze" && new RegExp(`\\{\\{c${ctx.ord + 1}::`).test(fields[name] ?? "");
   const nonEmpty = (name: string) => {
     if (/^c\d+$/.test(name)) return ctx.notetype.kind === "cloze" && Number(name.slice(1)) === ctx.ord + 1;
     const raw = fields[name] ?? "";
@@ -74,7 +73,6 @@ function renderTemplate(tmpl: string, ctx: RenderCtx, side: "q" | "a", frontHtml
     }
     return val;
   });
-  void hasCloze;
   return out;
 }
 
@@ -87,9 +85,11 @@ export function rewriteMedia(html: string, resolve?: (name: string) => string | 
   });
   out = out.replace(/\[sound:([^\]]+)\]/g, (_, name) => {
     const url = resolve?.(name);
-    return url ? `<audio controls preload="none" src="${url}"></audio>` : `<span class="missing-audio" title="${escapeHtml(name)}">🔇</span>`;
+    return url ? `<audio controls preload="none" src="${url}"></audio>` : ""; // audio is not imported; show nothing rather than a broken control
   });
   out = out.replace(/<script[\s\S]*?<\/script>/gi, "");
+  // Deck HTML runs in the app's origin: drop inline event handlers and javascript: URLs (their functions are gone with the scripts anyway).
+  out = out.replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "").replace(/(href|src)\s*=\s*(["']?)\s*javascript:[^"'>\s]*\2/gi, "");
   return out;
 }
 

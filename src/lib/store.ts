@@ -5,6 +5,7 @@ import { rate, replay, retrievability, DEFAULT_CONFIG, type SchedulerConfig, DAY
 import { fit as fitWeights, calibration as calib } from "../scheduler/optimize";
 import type { ImportResult } from "../import/anki";
 import { parsePack, describePack } from "../import/pack";
+import { noteTitle } from "./render";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, type MediaEnv } from "../import/media";
 import { GitHubSync, SyncError, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
@@ -50,7 +51,7 @@ export interface TreeNode {
   total: number; due: number; newCount: number; learning: number; suspended: number; reviewed: number;
 }
 
-export interface Stats { today: number; goal: number; streak: number; xp: number; level: number; levelFloor: number; levelCeil: number; todayXp: number }
+export interface Stats { today: number; goal: number; streak: number }
 
 type Listener = () => void;
 
@@ -97,7 +98,8 @@ export class Store {
     const gh = new GitHubSync(cfg);
     const t0 = Date.now();
     this.setSync("syncing", "Syncing…");
-    const progress = (m: string) => { this.syncStatus = { ...this.syncStatus, message: m }; this.bump(); };
+    let lastBump = 0;
+    const progress = (m: string) => { this.syncStatus = { ...this.syncStatus, message: m }; const t = Date.now(); if (t - lastBump > 250) { lastBump = t; this.bump(); } };
     try {
       let summary = "";
       for (let attempt = 0; attempt < 3; attempt++) {
@@ -115,30 +117,33 @@ export class Store {
               if (k.startsWith("n:")) { const id = k.slice(2); const n = this.notes.get(id); if (n && n.modified <= t) { this.notes.delete(id); dn.push(id); for (const c of this.cards.values()) if (c.nid === id) { this.cards.delete(c.id); dc.push(c.id); } } }
               else if (k.startsWith("c:")) { const id = k.slice(2); const c = this.cards.get(id); if (c && (c.mod ?? c.lastReview) <= t) { this.cards.delete(id); dc.push(id); } }
             }
+            const dr = Object.keys(got.tombstones).filter((k) => k.startsWith("r:")).map((k) => k.slice(2)).filter((id) => this.reviews.some((r) => r.id === id));
+            if (dr.length) { const set = new Set(dr); this.reviews = this.reviews.filter((r) => !set.has(r.id)); await db.deleteMany("reviews", dr); }
             if (dn.length) await db.deleteMany("notes", dn); if (dc.length) await db.deleteMany("cards", dc);
           }
           if (got.notes) { const before = new Map(this.notes); pulledN = mergeNotes(this.notes, got.notes, this.tombstones); const changed = got.notes.filter((n) => this.notes.get(n.id) === n && before.get(n.id) !== n); await db.putMany("notes", changed); }
           if (got.cards) { const changed: Card[] = []; for (const c of got.cards) { const l = this.cards.get(c.id); if ((this.tombstones["c:" + c.id] ?? -1) >= (c.mod ?? c.lastReview) || (this.tombstones["n:" + c.nid] ?? -1) >= (c.mod ?? c.lastReview)) continue; if (!l || (c.mod ?? c.lastReview) > (l.mod ?? l.lastReview)) changed.push(c); } pulledC = mergeCards(this.cards, got.cards, this.tombstones); await db.putMany("cards", changed); }
-          if (got.reviews) { const m = mergeReviews(this.reviews, got.reviews); pulledR = m.added; if (m.added) { const ids = new Set(this.reviews.map((r) => r.id)); await db.putMany("reviews", got.reviews.filter((r) => !ids.has(r.id))); this.reviews = m.list; } }
+          if (got.reviews) { const m = mergeReviews(this.reviews, got.reviews, this.tombstones); pulledR = m.added; if (m.added) { const ids = new Set(this.reviews.map((r) => r.id)); await db.putMany("reviews", got.reviews.filter((r) => !ids.has(r.id))); this.reviews = m.list; } }
           if (got.settings && (got.settings as any).updatedAt > ((this.settings as any).updatedAt ?? 0)) {
-            const { sync: _s, ...rest } = got.settings as any; this.settings = { ...this.settings, ...rest }; await db.setMeta("settings", this.settings);
+            const { sync: _s, deviceName: _d, nightCards: _n, swipe: _w, typeAnswers: _t, ...rest } = got.settings as any; // per-device fields stay local
+            this.settings = { ...this.settings, ...rest }; await db.setMeta("settings", this.settings);
           }
           if (got.media) { const blobs: { name: string; blob: Blob }[] = []; for (const [name, url] of Object.entries(got.media as Record<string, string>)) { if (this.media.has(name)) continue; const blob = await (await fetch(url)).blob(); this.media.set(name, blob); blobs.push({ name, blob }); } if (blobs.length) { await db.putMany("media", blobs); this.mediaUrls.clear(); } }
           if (pulledN + pulledC + pulledR) this.treeCache.clear();
         }
         await this.checkInbox(gh);
         progress("Preparing upload");
-        const { files, hashes } = await GitHubSync.shard({
+        const { hashes, make } = await GitHubSync.shard({
           notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(),
           settings: { ...this.settings, sync: undefined, updatedAt: (this.settings as any).updatedAt ?? 0 },
         }, this.shardCache);
         try {
-          const res = await gh.push(files, hashes, remote, this.settings.deviceName, progress);
+          const res = await gh.push(hashes, make, remote, this.settings.deviceName, progress);
           await db.setMeta("syncKnown", res.manifest.files);
           this.dirty = false; await db.setMeta("syncDirty", false);
           const parts = [];
           if (pulledN + pulledC + pulledR) parts.push(`pulled ${pulledC.toLocaleString()} cards, ${pulledR.toLocaleString()} reviews`);
-          if (res.pushed) parts.push(`pushed ${res.pushed} files`);
+          if (res.pushed) parts.push(`pushed ${res.pushed} files (${res.bytes > 1048576 ? (res.bytes / 1048576).toFixed(1) + " MB" : Math.round(res.bytes / 1024) + " KB"})`);
           summary = parts.length ? parts.join(", ") : "Up to date";
           break;
         } catch (e) {
@@ -192,6 +197,18 @@ export class Store {
   /** Problems found while loading (orphan cards dropped, bad values fixed). Shown in Settings → Diagnostics. */
   loadNotes: string[] = [];
 
+  /** One-off data fixes, each run once per device (flag in meta). */
+  private async migrations() {
+    const done = await db.getMeta<string[]>("migrations", []);
+    if (!done.includes("exam-not-specialty")) {
+      // "USMLE Step 1" used to be assigned as a specialty; it is an exam (Exams view) and belongs nowhere else.
+      const out: Note[] = []; const now = Date.now();
+      for (const n of this.notes.values()) if (n.tags.includes("auto::Specialty::USMLE Step 1")) { const m = { ...n, tags: n.tags.filter((t) => t !== "auto::Specialty::USMLE Step 1"), modified: now }; this.notes.set(n.id, m); out.push(m); }
+      if (out.length) { await db.putMany("notes", out); this.dirty = true; }
+      await db.setMeta("migrations", [...done, "exam-not-specialty"]);
+    }
+  }
+
   /** Run a persistence write; a failure is remembered and shown instead of silently losing data. */
   protected async persist<T>(what: string, p: Promise<T>): Promise<T | undefined> {
     try { const r = await p; if (this.saveError) { this.saveError = null; this.bump(); } return r; }
@@ -229,9 +246,11 @@ export class Store {
     this.syncLog = await db.getMeta<SyncLogEntry[]>("syncLog", []);
     this.dismissedPairs = new Set(await db.getMeta<string[]>("dismissedPairs", []));
     this.inbox = await db.getMeta<typeof this.inbox>("inbox", []);
+    this.undoStack = await db.getMeta<typeof this.undoStack>("undoStack", []);
     this.packLog = await db.getMeta<typeof this.packLog>("packLog", []);
     this.mergeLog = await db.getMeta<typeof this.mergeLog>("mergeLog2", []);
     this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) } };
+    await this.migrations();
     this.loaded = true;
     if (this.syncConfigured()) this.syncStatus = { state: "idle", message: "Ready", at: 0 };
     this.bump();
@@ -254,8 +273,9 @@ export class Store {
 
   async saveSettings(patch: Partial<Settings>) {
     this.settings = { ...this.settings, ...patch, updatedAt: Date.now() } as Settings;
-    await db.setMeta("settings", this.settings);
-    this.bump(); this.touch();
+    this.bump();
+    await this.persist("saving settings", db.setMeta("settings", this.settings));
+    this.touch();
   }
 
   /** Merge an import. Existing cards keep their Yuzu review state unless they had none. */
@@ -334,10 +354,12 @@ export class Store {
     onProgress?.("Merging duplicates", 0.1);
     let merged = 0, moved = 0, tagged = 0, dropped = 0;
     const log: { keep: string; dropped: Note[]; cards: Card[] }[] = [];
+    const keepSnap = new Map<string, { note: Note; cards: Card[] }>();
     const byNid = new Map<string, Card[]>(); for (const card of this.cards.values()) (byNid.get(card.nid) ?? byNid.set(card.nid, []).get(card.nid)!).push(card);
     for (const m of c.merges ?? []) {
       if (!this.notes.has(m.keep)) continue;
       const entry = { keep: m.keep, dropped: [] as Note[], cards: [] as Card[] };
+      if (!keepSnap.has(m.keep)) keepSnap.set(m.keep, { note: this.notes.get(m.keep)!, cards: byNid.get(m.keep) ?? [] });
       for (const d of m.drop) {
         const n = this.notes.get(d); if (!n || d === m.keep) continue;
         entry.dropped.push(n); delNotes.push(d); this.notes.delete(d);
@@ -365,7 +387,8 @@ export class Store {
     await db.putMany("notes", [...changedNotes.values()]); await db.putMany("cards", [...changedCards.values()]);
     if (delNotes.length) await db.deleteMany("notes", delNotes); if (delCards.length) await db.deleteMany("cards", delCards);
     await db.setMeta("tombstones", this.tombstones);
-    const prev = await db.getMeta<unknown[]>("mergeLog", []); await db.setMeta("mergeLog", [...prev, { at: now, name: c.name ?? "", merges: log }]);
+    this.mergeLog = [...log.map((e, i) => ({ at: now + i, keep: e.keep, dropped: e.dropped, cards: e.cards, keepBefore: keepSnap.get(e.keep)!.note, keepCardsBefore: keepSnap.get(e.keep)!.cards })), ...this.mergeLog].slice(0, 1000);
+    await db.setMeta("mergeLog2", this.mergeLog);
     this.bump(); this.touch();
     return `${merged} duplicate groups merged (${dropped} notes removed), ${moved.toLocaleString()} cards moved to new categories, ${tagged.toLocaleString()} tags added${c.review?.length ? `, ${c.review.length} similar pairs tagged needs-review::similar` : ""}.`;
   }
@@ -602,7 +625,12 @@ export class Store {
     const learning = cards.filter((c) => (c.state === "learning" || c.state === "relearning") && c.due <= now).sort((a, b) => a.due - b.due);
     const review = cards.filter((c) => c.state === "review" && c.due <= now).sort((a, b) => a.due - b.due);
     const budget = Math.max(0, this.settings.newPerDay - this.reviewedToday(now).newCards);
-    const fresh = cards.filter((c) => c.state === "new").sort((a, b) => a.due - b.due || a.created - b.created).slice(0, budget);
+    // New cards: oldest first within each category, categories taken in turns so one deck can't hog the daily budget.
+    const byCat = new Map<string, Card[]>();
+    for (const c of cards) if (c.state === "new") { const k = c.source.split("::").slice(0, 3).join("::"); (byCat.get(k) ?? byCat.set(k, []).get(k)!).push(c); }
+    for (const list of byCat.values()) list.sort((a, b) => a.due - b.due || a.created - b.created);
+    const fresh: Card[] = []; const lists = [...byCat.values()];
+    for (let i = 0; fresh.length < budget && lists.some((l) => l.length); i++) { const l = lists[i % lists.length]; if (l.length) fresh.push(l.shift()!); }
     // Interleave new cards among reviews so a session isn't all-new at the end.
     const out: Card[] = [...learning];
     if (this.settings.burySiblings) {
@@ -633,9 +661,7 @@ export class Store {
   async answer(cardId: string, g: Rating, durationMs = 0, now = Date.now()) {
     const card = this.cards.get(cardId);
     if (!card) return;
-    const { card: next, review, intervalDays } = rate(card, g, now, this.settings.scheduler, durationMs);
-    // Hesitant "Good" (much slower than usual) earns a slightly shorter interval: correct, but not yet fluent.
-    if (g === 3 && intervalDays >= 2 && durationMs > Math.max(15000, 2.5 * this.typicalAnswerMs())) next.due = now + Math.round((next.due - now) * 0.85);
+    const { card: next, review } = rate(card, g, now, this.settings.scheduler, durationMs);
     this.cards.set(cardId, next);
     this.reviews.push(review);
     // Leech: every `leechThreshold` lapses, mark the note and let the UI ask what went wrong.
@@ -646,11 +672,13 @@ export class Store {
       if (!note.tags.includes("leech")) { const m = { ...note, tags: [...note.tags, "leech"], modified: now }; this.notes.set(note.id, m); await this.persist("tagging a leech", db.putOne("notes", m)); }
     }
     this.lastAnswer = { cardId, leech, lapses: next.lapses };
-    await this.persist("saving the review", Promise.all([db.putOne("cards", next), db.putOne("reviews", review), db.setMeta("undo:" + review.id, card)]));
+    this.undoStack = [...this.undoStack.slice(-19), { reviewId: review.id, card }];
+    await this.persist("saving the review", Promise.all([db.putOne("cards", next), db.putOne("reviews", review), db.setMeta("undoStack", this.undoStack)]));
     this.bump(); this.touch();
     return next;
   }
   lastAnswer: { cardId: string; leech: boolean; lapses: number } | null = null;
+  undoStack: { reviewId: string; card: Card }[] = [];
 
   /** Record why a leech was missed; tags drive later remediation (packs from Claude, suspension). */
   async leechReason(cardId: string, reason: "knowledge" | "retrieval" | "confusion" | "suspend") {
@@ -664,7 +692,7 @@ export class Store {
   reversibleNotetypes(): { nt: Notetype; notes: number; on: boolean }[] {
     const count = new Map<string, number>();
     for (const c of this.cards.values()) { if (!c.source.startsWith("Languages") || c.ord !== 0) continue; const n = this.notes.get(c.nid); if (n) count.set(n.ntid, (count.get(n.ntid) ?? 0) + 1); }
-    return [...count].map(([id, n]) => ({ nt: this.notetypes.get(id)!, notes: n, on: !!this.notetypes.get(id)?.templates.some((t) => t.name === "Yuzu reverse") })).filter((x) => x.nt && x.nt.kind === "standard" && x.nt.fields.length >= 2 && (x.nt.templates.length === 1 || x.on)).sort((a, b) => b.notes - a.notes);
+    return [...count].map(([id, n]) => ({ nt: this.notetypes.get(id)!, notes: n, on: !!this.notetypes.get(id)?.templates.some((t) => t.name === "Yuzu reverse") })).filter((x) => x.nt && x.nt.kind === "standard" && x.nt.fields.length >= 2 && x.nt.fields.length <= 4 && !/occlusion|image/i.test(x.nt.name) && (x.nt.templates.length === 1 || x.on)).sort((a, b) => b.notes - a.notes);
   }
   /** Add (or suspend) reverse cards for a language note type: back → front. */
   async setReverse(ntid: string, on: boolean) {
@@ -783,16 +811,19 @@ export class Store {
     return out;
   }
 
-  async undoLast(): Promise<boolean> {
+  /** Undo the last review: restore the card (with a fresh `mod` so the undo wins on sync) and tombstone the review. */
+  async undoLast(): Promise<Card | null> {
     const last = this.reviews[this.reviews.length - 1];
-    if (!last || last.ts < Date.now() - 10 * 60000) return false;
-    const prev = await db.getMeta<Card | null>("undo:" + last.id, null);
-    if (!prev) return false;
+    const u = this.undoStack[this.undoStack.length - 1];
+    if (!last || !u || u.reviewId !== last.id || last.ts < Date.now() - 10 * 60000) return null;
+    const now = Date.now();
+    const prev = { ...u.card, mod: now };
     this.cards.set(prev.id, prev);
-    this.reviews.pop();
-    await this.persist("undoing the review", Promise.all([db.putOne("cards", prev), db.deleteMany("reviews", [last.id])]));
-    this.bump();
-    return true;
+    this.reviews.pop(); this.undoStack = this.undoStack.slice(0, -1);
+    this.tombstones["r:" + last.id] = now;
+    await this.persist("undoing the review", Promise.all([db.putOne("cards", prev), db.deleteMany("reviews", [last.id]), db.setMeta("undoStack", this.undoStack), db.setMeta("tombstones", this.tombstones)]));
+    this.bump(); this.touch();
+    return prev;
   }
 
   async bulk(cardIds: string[], action: { suspended?: boolean; flag?: number; addTag?: string; source?: string }) {
@@ -850,14 +881,11 @@ export class Store {
 
   stats(now = Date.now()): Stats {
     const { reviews: today } = this.reviewedToday(now);
-    // XP: 10 per review, +5 for Good, +8 for Easy, +2 for Hard; nothing extra for Again.
-    const xpFor = (r: Review) => 10 + (r.rating === 4 ? 8 : r.rating === 3 ? 5 : r.rating === 2 ? 2 : 0);
-    let xp = 0, todayXp = 0; const start = this.dayStart(now);
-    for (const r of this.reviews) { const x = xpFor(r); xp += x; if (r.ts >= start) todayXp += x; }
-    // Streak: consecutive days (ending today or yesterday) with at least one review.
+    // Streak: consecutive local days (ending today or yesterday) with at least one review. Days start at `rollover`.
+    const dayOf = (ts: number) => { const d = new Date(ts - this.settings.rollover * 3600000); return Math.floor((d.getTime() - d.getTimezoneOffset() * 60000) / DAY); };
     const days = new Set<number>();
-    for (const r of this.reviews) days.add(Math.floor((r.ts - this.settings.rollover * 3600000) / DAY));
-    let streak = 0; let d = Math.floor((now - this.settings.rollover * 3600000) / DAY);
+    for (const r of this.reviews) days.add(dayOf(r.ts));
+    let streak = 0; let d = dayOf(now);
     if (!days.has(d)) d--; // today isn't over yet
     // Rest days: up to `restDays` missed days per 7 don't break the streak (shift weeks happen).
     const rests: number[] = [];
@@ -867,41 +895,25 @@ export class Store {
       if (days.size && recent < this.settings.restDays && streak > 0) { rests.push(d); d--; continue; }
       break;
     }
-    // Level: each level needs 15% more than the last, starting at 500 XP.
-    let level = 1, floor = 0, need = 500;
-    while (xp >= floor + need) { floor += need; need = Math.round(need * 1.15); level++; }
-    return { today, goal: this.settings.dailyGoal, streak, xp, level, levelFloor: floor, levelCeil: floor + need, todayXp };
+    return { today, goal: this.settings.dailyGoal, streak };
   }
 
-  /** XP and level per system (from reviews of cards tagged auto::System::X). */
-  systemLevels(): { name: string; xp: number; level: number; pct: number; total: number; learned: number }[] {
-    const xpBy = new Map<string, number>(); const totals = new Map<string, { total: number; learned: number }>();
-    const sysOf = (c: Card) => (this.notes.get(c.nid)?.tags ?? []).filter((t) => t.startsWith("auto::System::")).map((t) => t.slice(14));
-    for (const c of this.cards.values()) for (const sname of sysOf(c)) { const t = totals.get(sname) ?? { total: 0, learned: 0 }; t.total++; if (c.state === "review") t.learned++; totals.set(sname, t); }
-    for (const r of this.reviews) { const c = this.cards.get(r.cid); if (!c) continue; const x = 10 + (r.rating === 4 ? 8 : r.rating === 3 ? 5 : r.rating === 2 ? 2 : 0); for (const sname of sysOf(c)) xpBy.set(sname, (xpBy.get(sname) ?? 0) + x); }
-    const out = [...totals.entries()].map(([name, t]) => {
-      const xp = xpBy.get(name) ?? 0; let level = 1, floor = 0, need = 150; while (xp >= floor + need) { floor += need; need = Math.round(need * 1.2); level++; }
-      return { name, xp, level, pct: Math.round(((xp - floor) / need) * 100), total: t.total, learned: t.learned };
-    });
-    return out.sort((a, b) => b.xp - a.xp || b.total - a.total);
+  /** Per-system totals and learned counts (for Progress), sorted by activity. */
+  systemTotals(): { name: string; total: number; learned: number }[] {
+    const totals = new Map<string, { total: number; learned: number }>();
+    for (const c of this.cards.values()) { if (c.suspended) continue; const n = this.notes.get(c.nid); if (!n) continue; for (const t of n.tags) if (t.startsWith("auto::System::")) { const k = t.slice(14); const e = totals.get(k) ?? { total: 0, learned: 0 }; e.total++; if (c.state === "review") e.learned++; totals.set(k, e); } }
+    return [...totals].map(([name, t]) => ({ name, ...t })).sort((a, b) => b.learned - a.learned || b.total - a.total);
   }
 
-  milestones(): { id: string; title: string; detail: string; earned: boolean; at?: number }[] {
-    const stats = this.stats();
-    const reviewsAt = (n: number) => (this.reviews.length >= n ? this.reviews[n - 1].ts : undefined);
-    const learned = [...this.cards.values()].filter((c) => c.state === "review" && !c.suspended).length;
-    const sys = this.systemLevels();
-    const best = sys.filter((s) => s.total >= 50).sort((a, b) => b.learned / b.total - a.learned / a.total)[0];
-    const m = [
-      ...[100, 1000, 5000, 10000, 25000].map((n) => ({ id: `rev${n}`, title: `${n.toLocaleString()} reviews`, detail: "all time", earned: this.reviews.length >= n, at: reviewsAt(n) })),
-      ...[7, 30, 100, 365].map((n) => ({ id: `streak${n}`, title: `${n}-day streak`, detail: `current: ${stats.streak}`, earned: stats.streak >= n })),
-      ...[100, 500, 2000, 5000].map((n) => ({ id: `learned${n}`, title: `${n.toLocaleString()} cards learned`, detail: `now ${learned.toLocaleString()}`, earned: learned >= n })),
-      { id: "sys90", title: "A system 90% learned", detail: best ? `${best.name}: ${Math.round((best.learned / best.total) * 100)}%` : "", earned: !!best && best.learned / best.total >= 0.9 },
-      ...[5, 10, 20].map((n) => ({ id: `lvl${n}`, title: `Level ${n}`, detail: `now level ${stats.level}`, earned: stats.level >= n })),
-    ];
-    return m;
+  private titleCache: { v: number; map: Map<string, string> } | null = null;
+  /** Lowercased title + tags per note, built once per store version, for fast search. */
+  searchIndex(): Map<string, string> {
+    if (this.titleCache && this.titleCache.v === this.version) return this.titleCache.map;
+    const map = new Map<string, string>();
+    for (const n of this.notes.values()) map.set(n.id, (noteTitle(n) + " " + n.tags.join(" ")).toLowerCase());
+    this.titleCache = { v: this.version, map };
+    return map;
   }
-
   noteFor(card: Card): Note | undefined { return this.notes.get(card.nid); }
   notetypeFor(note: Note): Notetype | undefined { return this.notetypes.get(note.ntid); }
   stateCounts(): Record<CardState | "suspended", number> {

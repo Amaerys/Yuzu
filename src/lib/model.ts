@@ -1,5 +1,5 @@
 // Yuzu data model. One note = one fact (its fields), one or more cards per note.
-// Categories are NOT stored on cards: cards carry tags, and the category tree is a view over tags.
+// A card's deck path lives in `source` (the Decks view). Systems / Specialties / Exams are views over the note's auto:: tags.
 // A card imported from Anki deck "Medicine::Emergency Medicine::EKG" gets the tag
 // "Medicine::Emergency Medicine::EKG" (hierarchical with ::) plus any Anki tags it had.
 
@@ -57,7 +57,6 @@ export interface Review {
   durationMs: number;
 }
 
-export interface MediaRef { name: string; cards: number }
 
 export interface ImportSummary {
   notetypes: number; notes: number; cards: number; reviews: number;
@@ -65,4 +64,3 @@ export interface ImportSummary {
   format: "anki21b" | "anki21" | "anki2";
 }
 
-export const DECK_SEP = "::";

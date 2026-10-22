@@ -17,7 +17,7 @@ test("two devices converge through push/pull with last-change-wins, starting fro
   const aNotes = new Map([["n1", mkNote("n1", 100)]]);
   const snapA = () => ({ notetypes: [], notes: [...aNotes.values()], cards: [...aCards.values()], reviews: [{ id: "1-100", cid: "1", ts: 100, rating: 3 as const, state: "review" as const, elapsedDays: 0, scheduledDays: 1, durationMs: 0 }], settings: { updatedAt: 1 } });
   const s1 = await GitHubSync.shard(snapA());
-  const r1 = await A.push(s1.files, s1.hashes, null, "A");
+  const r1 = await A.push(s1.hashes, s1.make, null, "A");
   assert.ok(r1.pushed > 0); assert.ok(gh.files()[".yuzu"], "bootstrap commit made");
   const man = (await B.pullManifest())!;
   const got = await B.pullChanged(man, {});
@@ -27,7 +27,7 @@ test("two devices converge through push/pull with last-change-wins, starting fro
   bCards.set("1", { ...bCards.get("1")!, mod: 200, lastReview: 200, reps: 2 });
   bReviews.push({ id: "1-200", cid: "1", ts: 200, rating: 3, state: "review", elapsedDays: 1, scheduledDays: 2, durationMs: 0 });
   const s2 = await GitHubSync.shard({ notetypes: [], notes: [...bNotes.values()], cards: [...bCards.values()], reviews: bReviews, settings: { updatedAt: 1 } });
-  const r2 = await B.push(s2.files, s2.hashes, man, "B");
+  const r2 = await B.push(s2.hashes, s2.make, man, "B");
   assert.ok(r2.pushed >= 1 && r2.pushed <= 3, "only changed shards pushed: " + r2.pushed);
   aCards.set("2", { ...aCards.get("2")!, suspended: true, mod: 150 });
   const man2 = (await A.pullManifest())!;
@@ -38,7 +38,7 @@ test("two devices converge through push/pull with last-change-wins, starting fro
   assert.equal(aCards.get("2")!.suspended, true, "A's newer suspend survives");
   assert.equal(mergedReviews.list.length, 2);
   const s3 = await GitHubSync.shard({ ...snapA(), cards: [...aCards.values()], reviews: mergedReviews.list });
-  const r3 = await A.push(s3.files, s3.hashes, man2, "A");
+  const r3 = await A.push(s3.hashes, s3.make, man2, "A");
   assert.ok(r3.pushed >= 1);
   const man3 = (await B.pullManifest())!;
   const gotB = await B.pullChanged(man3, r2.manifest.files);
@@ -46,7 +46,7 @@ test("two devices converge through push/pull with last-change-wins, starting fro
   assert.equal(bCards.get("2")!.suspended, true);
   assert.equal(bCards.get("1")!.reps, 2);
   const s4 = await GitHubSync.shard({ notetypes: [], notes: [...bNotes.values()], cards: [...bCards.values()], reviews: mergedReviews.list, settings: { updatedAt: 1 } });
-  const r4 = await B.push(s4.files, s4.hashes, man3, "B");
+  const r4 = await B.push(s4.hashes, s4.make, man3, "B");
   assert.equal(r4.pushed, 0, "converged: nothing left to push");
 });
 
@@ -54,16 +54,16 @@ test("a push that loses the race gets a conflict error; retrying after a pull su
   const gh = fakeGitHub();
   const A = client(gh), B = client(gh);
   const base = await GitHubSync.shard({ notetypes: [], notes: [], cards: [mkCard("1", 1)], reviews: [], settings: { updatedAt: 1 } });
-  const r0 = await A.push(base.files, base.hashes, null, "A");
+  const r0 = await A.push(base.hashes, base.make, null, "A");
   const manA = (await A.pullManifest())!; const manB = (await B.pullManifest())!;
   const sB = await GitHubSync.shard({ notetypes: [], notes: [], cards: [mkCard("1", 1), mkCard("2", 2)], reviews: [], settings: { updatedAt: 1 } });
-  await B.push(sB.files, sB.hashes, manB, "B");
+  await B.push(sB.hashes, sB.make, manB, "B");
   const sA = await GitHubSync.shard({ notetypes: [], notes: [], cards: [mkCard("1", 1), mkCard("3", 3)], reviews: [], settings: { updatedAt: 1 } });
-  await assert.rejects(A.push(sA.files, sA.hashes, manA, "A"), (e: any) => e instanceof SyncError && e.kind === "conflict");
+  await assert.rejects(A.push(sA.hashes, sA.make, manA, "A"), (e: any) => e instanceof SyncError && e.kind === "conflict");
   const man2 = (await A.pullManifest())!; const got = await A.pullChanged(man2, r0.manifest.files);
   const cards = new Map([["1", mkCard("1", 1)], ["3", mkCard("3", 3)]]); mergeCards(cards, got.cards!);
   const sA2 = await GitHubSync.shard({ notetypes: [], notes: [], cards: [...cards.values()], reviews: [], settings: { updatedAt: 1 } });
-  const r = await A.push(sA2.files, sA2.hashes, man2, "A");
+  const r = await A.push(sA2.hashes, sA2.make, man2, "A");
   assert.ok(r.pushed >= 1);
   const final = await B.pullChanged((await B.pullManifest())!, {});
   assert.deepEqual(final.cards!.map((c) => c.id).sort(), ["1", "2", "3"]);
@@ -96,4 +96,18 @@ test("tombstones: a deleted note does not come back from remote, later edits do"
   const cards = new Map<string, any>();
   assert.equal(mergeCards(cards, [{ id: "x", nid: "b", mod: 500 } as any, { id: "y", nid: "a", mod: 500 } as any], tombs), 0, "card tombstone and note tombstone both apply");
   assert.deepEqual(mergeTombstones({ "n:a": 5 }, { "n:a": 3, "n:b": 9 }), { "n:a": 5, "n:b": 9 });
+});
+
+test("large shards are stored gzip-compressed and round-trip; changing one card re-uploads kilobytes", async () => {
+  const gh = fakeGitHub(); const A = client(gh), B = client(gh);
+  const cards = Array.from({ length: 40000 }, (_, i) => mkCard(String(i), 1));
+  const s1 = await GitHubSync.shard({ notetypes: [], notes: [], cards, reviews: [], settings: { updatedAt: 1 } });
+  const r1 = await A.push(s1.hashes, s1.make, null, "A");
+  assert.ok(Object.values(r1.manifest.stored ?? {}).some((p) => p.endsWith(".gz")), "some shards gzipped");
+  const got = await B.pullChanged((await B.pullManifest())!, {});
+  assert.equal(got.cards!.length, 40000, "all cards come back through gunzip");
+  cards[7] = { ...cards[7], mod: 2, reps: 2 };
+  const s2 = await GitHubSync.shard({ notetypes: [], notes: [], cards, reviews: [], settings: { updatedAt: 1 } });
+  const r2 = await A.push(s2.hashes, s2.make, (await A.pullManifest())!, "A");
+  assert.equal(r2.pushed, 1); assert.ok(r2.bytes < 20000, `one review should upload a few KB, got ${r2.bytes}`);
 });

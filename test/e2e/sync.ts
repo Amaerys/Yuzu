@@ -10,7 +10,7 @@ async function device(name: string) {
   page.on("dialog", (d) => d.accept());
   await page.route("https://api.github.com/**", async (route) => {
     const req = route.request(); const res = await gh.fetchImpl(req.url(), { method: req.method(), body: req.postData() ?? undefined } as any);
-    await route.fulfill({ status: res.status, body: await res.text(), contentType: "application/json" });
+    await route.fulfill({ status: res.status, body: Buffer.from(await res.arrayBuffer()), contentType: "application/octet-stream" });
   });
   await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2500);
   await page.click("nav.tabs >> text=Settings"); await page.waitForTimeout(400);
@@ -31,7 +31,7 @@ try {
   console.log("B first sync:", await status(B), "|", await counts(B), "(A:", await counts(A) + ")");
   // B studies 3 cards, then leaves the app (visibility hidden → immediate sync)
   const study = async (page: any, ratings: string[]) => {
-    await page.click("nav.tabs >> text=Today"); await page.waitForTimeout(300); await page.click("text=Study everything"); await page.waitForTimeout(400);
+    await page.click("nav.tabs >> text=Today"); await page.waitForTimeout(300); await page.click(".hero >> text=Study"); await page.waitForTimeout(400);
     if (await page.locator("text=25 cards").count()) await page.click("text=25 cards");
     for (const r of ratings) { await page.click("text=Show answer"); await page.click(`.answer-bar .${r}`); await page.waitForTimeout(250); }
     await page.click('[aria-label="Close"]'); await page.waitForTimeout(300);
@@ -61,5 +61,12 @@ try {
   await A.click("text=Remove"); await A.waitForTimeout(800);
   console.log("notes after remove:", await A.evaluate(() => (window as any).yuzu.notes.size));
   await B.click("text=Sync now"); await B.waitForTimeout(2500); console.log("B inbox after sync:", await B.evaluate(() => (window as any).yuzu.inbox.length), "B notes:", await B.evaluate(() => (window as any).yuzu.notes.size));
+  // Undo survives sync: B reviews one card, syncs, undoes it, syncs; A must end up without that review.
+  const revBefore = await A.evaluate(() => (window as any).yuzu.reviews.length);
+  const syncOf = async (p: any) => { await p.evaluate(async () => { const y = (window as any).yuzu; while (y.syncStatus.state === "syncing") await new Promise((r) => setTimeout(r, 100)); await y.sync(); }); };
+  await study(B, ["good"]); await syncOf(B); await syncOf(A);
+  console.log("A reviews after B's review:", await A.evaluate(() => (window as any).yuzu.reviews.length), "(before", revBefore + ")");
+  await B.evaluate(() => (window as any).yuzu.undoLast()); await syncOf(B); await syncOf(A);
+  console.log("A reviews after B's undo:", await A.evaluate(() => (window as any).yuzu.reviews.length), "(should be", revBefore + ")");
   console.log("history A:", await A.evaluate(() => [...document.querySelectorAll("details li")].map((l) => l.textContent?.replace(/^.*· /, "")).slice(0, 4)));
 } finally { console.log("errors:", errors.length ? errors : "none"); await browser.close(); server.kill(); }
