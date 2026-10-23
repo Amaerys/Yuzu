@@ -60,7 +60,7 @@ function SmartEditor({ initial, onClose }: { initial?: SmartDeck; onClose: () =>
   );
 }
 
-export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: View) => void; onBoss: (path: string, view: View, name: string) => void }) {
+export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: View, extra?: { only?: "all" | "due" | "new" }) => void; onBoss: (path: string, view: View, name: string) => void }) {
   const [view, setView] = useState<View>("decks");
   const [path, setPath] = useState("");
   const [showCards, setShowCards] = useState(false);
@@ -95,11 +95,10 @@ export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: Vie
 
   const matches = useMemo(() => {
     if (!showCards && !q) return [] as Card[];
-    const index = q ? store.searchIndex() : null;
     const seen = new Set<string>(); const out: Card[] = [];
     for (const c of scopeCards) {
       if (seen.has(c.nid)) continue;
-      if (index && !(index.get(c.nid) ?? "").includes(q)) continue;
+      if (q) { const n = store.noteFor(c); if (!n || !store.searchText(n).includes(q)) continue; }
       seen.add(c.nid); out.push(c);
     }
     const order = { learning: 0, relearning: 0, review: 1, new: 2 } as Record<string, number>;
@@ -154,7 +153,8 @@ export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: Vie
               <button className="btn primary" onClick={() => onStudy(path, view)} disabled={counts.due + counts.fresh + counts.learning === 0}><IconPlay /> Study</button>
             </div>
             <div className="row small" style={{ marginTop: 10, gap: 14 }}>
-              <span><b className="c-due">{counts.due.toLocaleString()}</b> due</span><span><b className="c-learn">{counts.learning}</b> learning</span><span><b>{counts.fresh.toLocaleString()}</b> new</span>
+              <button className="chip" disabled={!counts.due && !counts.learning} onClick={() => onStudy(path, view, { only: "due" })} title="Study only what is due"><b className="c-due">{counts.due.toLocaleString()}</b> due{counts.learning ? ` · ${counts.learning} learning` : ""}</button>
+              <button className="chip" disabled={!counts.fresh} onClick={() => onStudy(path, view, { only: "new" })} title="Learn new cards only"><b>{counts.fresh.toLocaleString()}</b> new</button>
               {smart && <button className="chip" style={{ marginLeft: "auto" }} onClick={() => setEditSmart(smart)}>Edit</button>}
             </div>
             {view !== "smart" && path && (() => { const pool = bossPool(path, view).length; const b = store.settings.bosses[`${view}:${path}`]; return pool >= 10 ? (

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { store, type View } from "../lib/store";
 import type { Card, Rating } from "../lib/model";
-import { renderCard } from "../lib/render";
+import { renderCard, noteTitle } from "../lib/render";
 import { previewIntervals, humanInterval, retrievability, DAY } from "../scheduler/fsrs";
 import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore } from "./icons";
 import { systemColor, stamp, tilt } from "./theme";
@@ -103,9 +103,13 @@ function CardInfo({ card, onClose, onSaved }: { card: Card; onClose: () => void;
   );
 }
 
-export function Study({ path, view = "decks", onExit }: { path: string; view?: View; onExit: () => void }) {
-  const fullQueue = useMemo(() => store.queue(path, Date.now(), view), [path, view]);
-  const [plan, setPlan] = useState<number | null>(fullQueue.length > 15 ? null : fullQueue.length);
+export type StudyScope = { path: string; view?: View; only?: "all" | "due" | "new"; preset?: Card[]; title?: string };
+
+export function Study({ path, view = "decks", only = "all", preset, title, onExit }: StudyScope & { onExit: () => void }) {
+  const fullQueue = useMemo(() => preset ?? store.queue(path, Date.now(), view, only), [path, view, only]);
+  const [plan, setPlan] = useState<number | null>(preset || fullQueue.length <= 15 ? fullQueue.length : null);
+  const startedAt = useRef(Date.now());
+  const [results, setResults] = useState<{ id: string; g: Rating; ms: number }[]>([]);
   const [queue, setQueue] = useState<Card[]>(fullQueue);
   const [idx, setIdx] = useState(0);
   const [showAnswer, setShowAnswer] = useState(false);
@@ -171,7 +175,9 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
   async function answer(g: Rating) {
     if (!card || busy.current) return;
     busy.current = true;
-    try { await store.answer(card.id, g, Date.now() - shownAt.current); } finally { busy.current = false; }
+    const ms = Date.now() - shownAt.current;
+    try { await store.answer(card.id, g, ms); } finally { busy.current = false; }
+    setResults((r) => [...r, { id: card.id, g, ms }]);
     setDoneCount((d) => d + 1);
     if (store.lastAnswer?.leech && store.lastAnswer.cardId === card.id) setLeech({ cardId: card.id, lapses: store.lastAnswer.lapses });
     setIdx((i) => i + 1);
@@ -183,7 +189,7 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
       // Show the undone card again, in place: it is still in the queue at idx-1 (or was inserted later as a lapse).
       setQueue((q) => { const at = q.findIndex((c, i) => i < idx && c.id === prev.id); if (at >= 0) { const c = [...q]; c[at] = prev; return c; } return [prev, ...q.slice(idx)]; });
       setIdx((i) => { const at = queue.findIndex((c, k) => k < i && c.id === prev.id); return at >= 0 ? at : 0; });
-      setDoneCount((d) => Math.max(0, d - 1)); flash("Undone");
+      setDoneCount((d) => Math.max(0, d - 1)); setResults((r) => r.slice(0, -1)); flash("Undone");
     } else flash("Nothing to undo");
   }
   function flash(msg: string) { setToast(msg); setTimeout(() => setToast(""), 1400); }
@@ -221,16 +227,29 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
   }
 
   if (!card) {
-    const ahead = store.learningAhead(path, Date.now(), view);
-    const left = store.queue(path, Date.now(), view).length;
+    const ahead = preset ? [] : store.learningAhead(path, Date.now(), view);
+    const left = preset ? 0 : store.queue(path, Date.now(), view, only).length;
+    const missed = [...new Set(results.filter((r) => r.g === 1).map((r) => r.id))].map((id) => store.cards.get(id)!).filter(Boolean);
+    const graded = results.filter((r) => store.cards.get(r.id)); const ok = results.filter((r) => r.g > 1).length;
+    const mins = Math.max(1, Math.round((Date.now() - startedAt.current) / 60000));
+    const slow = [...graded].sort((a, b) => b.ms - a.ms).slice(0, 3).filter((r) => r.ms > 15000);
     return (
       <div className="study">
         <div className="study-top"><button className="icon-btn" onClick={onExit} aria-label="Close"><IconClose /></button><div className="grow" /></div>
         <div className="study-body">
           <div className="done">
             <div className="big">{doneCount}</div>
-            <div>cards reviewed in this session</div>
-            {left > 0 && <p className="muted small">{left} more ready. <button className="btn" style={{ marginLeft: 6 }} onClick={() => { setQueue(store.queue(path, Date.now(), view)); setIdx(0); setPlan(left); }}>Keep going</button></p>}
+            <div>cards in {mins} min{results.length ? ` · ${Math.round((ok / results.length) * 100)}% recalled` : ""}</div>
+            {missed.length > 0 && (
+              <div className="card-box" style={{ textAlign: "left", marginTop: 18 }}>
+                <b>{missed.length} missed</b>
+                <div className="small muted" style={{ margin: "4px 0 10px" }}>Going through them once more now, while they are fresh, is the cheapest review you will ever do.</div>
+                {missed.slice(0, 5).map((c) => { const n = store.noteFor(c); return <div key={c.id} className="small" style={{ padding: "4px 0", borderTop: "1px solid var(--line-soft)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n ? noteTitle(n) : ""}</div>; })}
+                <button className="btn primary block" style={{ marginTop: 10 }} onClick={() => { setQueue(missed); setIdx(0); setPlan(missed.length); setResults([]); setDoneCount(0); startedAt.current = Date.now(); }}>Redo the missed ones</button>
+              </div>
+            )}
+            {slow.length > 0 && <p className="muted small">Slowest: {slow.map((r) => `${Math.round(r.ms / 1000)} s`).join(", ")} — correct but slow is a card worth reading twice.</p>}
+            {left > 0 && <p className="muted small">{left.toLocaleString()} more ready. <button className="btn" style={{ marginLeft: 6 }} onClick={() => { setQueue(store.queue(path, Date.now(), view, only)); setIdx(0); setPlan(left); setResults([]); setDoneCount(0); startedAt.current = Date.now(); }}>Keep going</button></p>}
             {ahead.length > 0 && <p className="muted small">{ahead.length} learning card{ahead.length > 1 ? "s" : ""} will come back later today.</p>}
             <button className="btn primary" onClick={onExit} style={{ marginTop: 16 }}>Done</button>
           </div>
@@ -244,7 +263,7 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
       <div className="study-top">
         <button className="icon-btn" onClick={onExit} aria-label="Close"><IconClose /></button>
         <div className="progress"><i style={{ width: `${total ? (idx / total) * 100 : 0}%` }} /></div>
-        <span className="small muted" style={{ minWidth: 56, textAlign: "right" }}>{idx}/{total}</span>
+        <span className="small muted num" style={{ minWidth: 64, textAlign: "right" }} title="cards left · minutes left">{total - idx} left · {Math.max(1, Math.round(((total - idx) * secs) / 60))}m</span>
         <button className="icon-btn" onClick={undo} aria-label="Undo"><IconUndo /></button>
         <button className={"icon-btn" + (menu ? " on" : "")} onClick={() => setMenu(!menu)} aria-label="More"><IconMore /></button>
       </div>
@@ -257,7 +276,7 @@ export function Study({ path, view = "decks", onExit }: { path: string; view?: V
         </div>
       </>)}
       <div className="study-meta">
-        <span className="where">{card.source.split("::").slice(-2).join(" › ")}</span>
+        <span className="where">{title ?? card.source.split("::").slice(-2).join(" › ")}</span>
         {card.flag ? <span className="chip orange" style={{ minHeight: 24, padding: "2px 8px" }}>flagged</span> : null}
       </div>
       <div className="study-body" onClick={() => !showAnswer && setShowAnswer(true)} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}

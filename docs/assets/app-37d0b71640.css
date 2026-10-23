@@ -26,8 +26,6 @@
   --safe-b: env(safe-area-inset-bottom, 0px);
   --safe-t: env(safe-area-inset-top, 0px);
   --font: "Bricolage Grotesque", "Segoe UI", system-ui, -apple-system, sans-serif;
-  /* aliases kept for older components */
-  --bg: var(--ink); --bg-2: var(--ink-2); --bg-3: var(--ink-3); --yuzu-2: var(--leaf);
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; background: var(--ink); color: var(--text); font-family: var(--font); font-size: 16px; font-optical-sizing: auto; }

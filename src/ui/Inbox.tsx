@@ -39,7 +39,7 @@ function Review({ sha, onDone }: { sha: string; onDone: () => void }) {
           {(c.back || c.extra) && <span className="small muted" style={{ whiteSpace: "normal" }}>{clean(c.back ?? c.extra).slice(0, 160)}</span>}
         </button>
       ))}
-      <div className="row" style={{ marginTop: 12, position: "sticky", bottom: "calc(76px + var(--safe-b))", background: "var(--bg)", padding: "8px 0" }}>
+      <div className="row" style={{ marginTop: 12, position: "sticky", bottom: "calc(76px + var(--safe-b))", background: "var(--ink)", padding: "8px 0" }}>
         <button className="btn primary grow" disabled={busy || keep === 0} onClick={async () => { setBusy(true); setMsg(await store.acceptInbox(sha, cards.map((_, i) => i).filter((i) => !dropped.has(i)))); setBusy(false); onDone(); }}>Add {keep} card{keep === 1 ? "" : "s"}</button>
         <button className="btn" disabled={busy} onClick={async () => { await store.dismissInbox(sha); onDone(); }}>Discard pack</button>
       </div>

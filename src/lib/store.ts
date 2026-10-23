@@ -13,6 +13,10 @@ import { GitHubSync, SyncError, mergeCards, mergeNotes, mergeReviews, mergeTombs
 export interface Settings {
   newPerDay: number;
   dailyGoal: number;      // reviews per day
+  /** 0 = no limit. With a backlog, caps the due cards offered per day so sessions stay sane. */
+  maxReviewsPerDay: number;
+  /** Order of due cards: by due date, most-forgotten first (lowest recall probability), or shuffled within the day. */
+  dueOrder: "due" | "forgotten" | "shuffle";
   rollover: number;       // hour of day when a new day starts
   scheduler: SchedulerConfig;
   deviceName: string;
@@ -33,7 +37,7 @@ export interface Settings {
   sync: { owner: string; repo: string; token: string; auto: boolean };
 }
 export const DEFAULT_SETTINGS: Settings = {
-  newPerDay: 20, dailyGoal: 60, rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
+  newPerDay: 20, dailyGoal: 60, maxReviewsPerDay: 0, dueOrder: "forgotten", rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
   fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, bosses: {}, typeAnswers: true,
 };
@@ -54,6 +58,19 @@ export interface TreeNode {
 export interface Stats { today: number; goal: number; streak: number }
 
 type Listener = () => void;
+
+/** Spread cards so neighbours rarely share a group (system / deck): interleaving helps discrimination. Keeps the overall order roughly intact. */
+export function interleaveBySystem<T>(list: T[], groupOf: (x: T) => string): T[] {
+  if (list.length < 3) return list;
+  const out: T[] = []; const pending = [...list];
+  let last = "";
+  while (pending.length) {
+    let idx = pending.findIndex((x, i) => i < 6 && groupOf(x) !== last);
+    if (idx < 0) idx = 0;
+    const x = pending.splice(idx, 1)[0]; out.push(x); last = groupOf(x);
+  }
+  return out;
+}
 
 export class Store {
   notetypes = new Map<string, Notetype>();
@@ -562,18 +579,15 @@ export class Store {
       if (c.state === "learning" || c.state === "relearning") node.learning++;
       if (c.reps > 0) node.reviewed++;
     };
+    // The same paths repeat across thousands of cards (deck paths, deep tag hierarchies): resolve each path's node chain once.
+    const chains = new Map<string, TreeNode[]>();
+    const chainOf = (p: string) => { let ch = chains.get(p); if (!ch) { const parts = p.split("::"); ch = []; for (let i = 1; i <= parts.length; i++) ch.push(getNode(parts.slice(0, i).join("::"))); chains.set(p, ch); } return ch; };
     for (const c of this.cards.values()) {
       count(root, c);
-      const seen = new Set<string>();
-      for (const p of this.paths(c, view)) {
-        const parts = p.split("::");
-        for (let i = 1; i <= parts.length; i++) {
-          const key = parts.slice(0, i).join("::");
-          if (seen.has(key)) continue;
-          seen.add(key);
-          count(getNode(key), c);
-        }
-      }
+      const ps = this.paths(c, view);
+      if (ps.length === 1) { for (const n of chainOf(ps[0])) count(n, c); continue; }
+      const seen = new Set<TreeNode>();
+      for (const p of ps) for (const n of chainOf(p)) { if (seen.has(n)) continue; seen.add(n); count(n, c); }
     }
     const sortRec = (n: TreeNode) => { n.children.sort((a, b) => a.name.localeCompare(b.name)); n.children.forEach(sortRec); };
     sortRec(root);
@@ -620,11 +634,17 @@ export class Store {
   }
 
   /** Build today's queue for a scope: learning due → reviews due → new (within budget). */
-  queue(path: string, now = Date.now(), view: View = "decks"): Card[] {
+  queue(path: string, now = Date.now(), view: View = "decks", only: "all" | "due" | "new" = "all"): Card[] {
     const cards = this.cardsIn(path, view).filter((c) => !c.suspended);
-    const learning = cards.filter((c) => (c.state === "learning" || c.state === "relearning") && c.due <= now).sort((a, b) => a.due - b.due);
-    const review = cards.filter((c) => c.state === "review" && c.due <= now).sort((a, b) => a.due - b.due);
-    const budget = Math.max(0, this.settings.newPerDay - this.reviewedToday(now).newCards);
+    const learning = only === "new" ? [] : cards.filter((c) => (c.state === "learning" || c.state === "relearning") && c.due <= now).sort((a, b) => a.due - b.due);
+    let review = only === "new" ? [] : cards.filter((c) => c.state === "review" && c.due <= now);
+    const order = this.settings.dueOrder;
+    if (order === "forgotten") review.sort((a, b) => retrievability((now - a.lastReview) / DAY, a.stability) - retrievability((now - b.lastReview) / DAY, b.stability));
+    else if (order === "shuffle") { for (let i = review.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [review[i], review[j]] = [review[j], review[i]]; } }
+    else review.sort((a, b) => a.due - b.due);
+    if (this.settings.maxReviewsPerDay > 0) review = review.slice(0, Math.max(0, this.settings.maxReviewsPerDay - this.reviewedToday(now).reviews));
+    review = interleaveBySystem(review, (c) => this.notes.get(c.nid)?.tags.find((t) => t.startsWith("auto::System::")) ?? c.source.split("::").slice(0, 3).join("::"));
+    const budget = only === "due" ? 0 : Math.max(0, this.settings.newPerDay - this.reviewedToday(now).newCards);
     // New cards: oldest first within each category, categories taken in turns so one deck can't hog the daily budget.
     const byCat = new Map<string, Card[]>();
     for (const c of cards) if (c.state === "new") { const k = c.source.split("::").slice(0, 3).join("::"); (byCat.get(k) ?? byCat.set(k, []).get(k)!).push(c); }
@@ -898,21 +918,31 @@ export class Store {
     return { today, goal: this.settings.dailyGoal, streak };
   }
 
-  /** Per-system totals and learned counts (for Progress), sorted by activity. */
-  systemTotals(): { name: string; total: number; learned: number }[] {
-    const totals = new Map<string, { total: number; learned: number }>();
-    for (const c of this.cards.values()) { if (c.suspended) continue; const n = this.notes.get(c.nid); if (!n) continue; for (const t of n.tags) if (t.startsWith("auto::System::")) { const k = t.slice(14); const e = totals.get(k) ?? { total: 0, learned: 0 }; e.total++; if (c.state === "review") e.learned++; totals.set(k, e); } }
-    return [...totals].map(([name, t]) => ({ name, ...t })).sort((a, b) => b.learned - a.learned || b.total - a.total);
+  /** Cards rated Again today (unique), oldest first: a short re-drill before bed is one of the cheapest wins in spaced repetition. */
+  missedToday(now = Date.now()): Card[] {
+    const start = this.dayStart(now); const seen = new Set<string>(); const out: Card[] = [];
+    for (let i = this.reviews.length - 1; i >= 0 && this.reviews[i].ts >= start; i--) { const r = this.reviews[i]; if (r.rating !== 1 || seen.has(r.cid)) continue; seen.add(r.cid); const c = this.cards.get(r.cid); if (c && !c.suspended) out.push(c); }
+    return out.reverse();
+  }
+  /** The system with the lowest recall over the last 7 days (at least 10 review-state reviews), for a targeted session. */
+  weakestSystem(now = Date.now()): { name: string; retention: number; n: number } | null {
+    const by = new Map<string, { ok: number; n: number }>();
+    for (let i = this.reviews.length - 1; i >= 0 && this.reviews[i].ts >= now - 7 * DAY; i--) {
+      const r = this.reviews[i]; if (r.state !== "review") continue;
+      const n = this.notes.get(this.cards.get(r.cid)?.nid ?? ""); if (!n) continue;
+      for (const t of n.tags) if (t.startsWith("auto::System::")) { const e = by.get(t.slice(14)) ?? by.set(t.slice(14), { ok: 0, n: 0 }).get(t.slice(14))!; e.n++; if (r.rating > 1) e.ok++; }
+    }
+    let best: { name: string; retention: number; n: number } | null = null;
+    for (const [name, e] of by) if (e.n >= 10) { const ret = e.ok / e.n; if (!best || ret < best.retention) best = { name, retention: ret, n: e.n }; }
+    return best && best.retention < 0.85 ? best : null;
   }
 
-  private titleCache: { v: number; map: Map<string, string> } | null = null;
-  /** Lowercased title + tags per note, built once per store version, for fast search. */
-  searchIndex(): Map<string, string> {
-    if (this.titleCache && this.titleCache.v === this.version) return this.titleCache.map;
-    const map = new Map<string, string>();
-    for (const n of this.notes.values()) map.set(n.id, (noteTitle(n) + " " + n.tags.join(" ")).toLowerCase());
-    this.titleCache = { v: this.version, map };
-    return map;
+  private titles = new WeakMap<Note, string>();
+  /** Lowercased title + tags of a note, cached per note object (a changed note is a new object, so no invalidation needed). */
+  searchText(n: Note): string {
+    let t = this.titles.get(n);
+    if (t === undefined) { t = (noteTitle(n) + " " + n.tags.join(" ")).toLowerCase(); this.titles.set(n, t); }
+    return t;
   }
   noteFor(card: Card): Note | undefined { return this.notes.get(card.nid); }
   notetypeFor(note: Note): Notetype | undefined { return this.notetypes.get(note.ntid); }

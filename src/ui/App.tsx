@@ -3,7 +3,7 @@ import { store, type View } from "../lib/store";
 import { Today } from "./Today";
 import { Library } from "./Library";
 import { Settings } from "./Settings";
-import { Study } from "./Study";
+import { Study, type StudyScope } from "./Study";
 import { IconToday, IconLibrary, IconProgress, IconSettings, YuzuMark } from "./icons";
 import { Progress } from "./Progress";
 import { Boss } from "./Boss";
@@ -70,8 +70,8 @@ export function App() { return <ErrorBoundary><AppInner /></ErrorBoundary>; }
 function AppInner() {
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
   const [tab, setTab] = useState<Tab>("today");
-  const [study, setStudy] = useState<{ path: string; view: View; boss?: string } | null>(null);
-  const startStudy = (path: string, view: View = "decks") => setStudy({ path, view });
+  const [study, setStudy] = useState<(StudyScope & { boss?: string }) | null>(null);
+  const startStudy = (path: string, view: View = "decks", extra: Partial<StudyScope> = {}) => setStudy({ path, view, ...extra });
   const startBoss = (path: string, view: View, name: string) => setStudy({ path, view, boss: name });
   const [update, setUpdate] = useState<(() => void) | null>(null);
   const [inbox, setInbox] = useState(false);
@@ -88,8 +88,8 @@ function AppInner() {
   if (!store.loaded) {
     return <div className="screen" style={{ display: "flex", flexDirection: "column", gap: 16, alignItems: "center", justifyContent: "center", minHeight: "80dvh" }}><YuzuMark size={56} />{slow && <div className="small muted" style={{ textAlign: "center" }}>Still loading… a large collection can take a few seconds.<br /><button className="btn" style={{ marginTop: 10 }} onClick={repairApp}>Repair app</button></div>}</div>;
   }
-  if (study !== null && study.boss !== undefined) return <Boss path={study.path} view={study.view} name={study.boss} onExit={() => setStudy(null)} />;
-  if (study !== null) return <Study path={study.path} view={study.view} onExit={() => setStudy(null)} />;
+  if (study !== null && study.boss !== undefined) return <Boss path={study.path} view={study.view ?? "decks"} name={study.boss} onExit={() => setStudy(null)} />;
+  if (study !== null) return <Study {...study} onExit={() => setStudy(null)} />;
 
   return (
     <div className="app">

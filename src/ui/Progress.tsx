@@ -53,8 +53,8 @@ function derive() {
   let ok = 0, all = 0;
   for (const r of store.reviews) if (r.ts > now - 30 * DAY && r.state === "review") { all++; if (r.rating > 1) ok++; }
   const retention = all ? Math.round((ok / all) * 100) : null;
-  const systems = store.systemTotals();
   const mastery = store.masteryBySystem(now);
+  const systems = [...mastery].map(([name, m]) => ({ name, total: m.total, learned: m.total - m.unseen })).sort((a, b) => b.learned - a.learned || b.total - a.total);
   const tree = store.tree();
   const cats = tree.children.map((c) => ({ name: c.name, total: c.total, learned: c.reviewed, pct: c.total ? Math.round((c.reviewed / c.total) * 100) : 0 })).sort((a, b) => b.learned - a.learned);
   return { stats, counts, perDay, maxD, retention, systems, mastery, cats, now };
@@ -72,7 +72,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
       <h2>Last 12 weeks</h2>
       <div className="card-box" style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gridAutoFlow: "column", gridTemplateRows: "repeat(7, 1fr)", gap: 3 }}>
         {perDay.map((n, i) => (
-          <div key={i} title={`${n} reviews`} style={{ aspectRatio: "1", borderRadius: 3, background: n === 0 ? "var(--bg-3)" : `rgba(255,122,26,${0.25 + 0.75 * (n / maxD)})` }} />
+          <div key={i} title={`${n} reviews`} style={{ aspectRatio: "1", borderRadius: 3, background: n === 0 ? "var(--ink-3)" : `rgba(255,122,26,${0.25 + 0.75 * (n / maxD)})` }} />
         ))}
       </div>
       <h2>Cards</h2>

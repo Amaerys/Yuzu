@@ -29,7 +29,8 @@ export function YuzuGoal({ value, max, size = 104, center, sub }: { value: numbe
   );
 }
 
-export function Today({ onStudy, onInbox }: { onStudy: (path: string, view?: View) => void; onInbox?: () => void }) {
+type OnStudy = (path: string, view?: View, extra?: { only?: "all" | "due" | "new"; preset?: import("../lib/model").Card[]; title?: string }) => void;
+export function Today({ onStudy, onInbox }: { onStudy: OnStudy; onInbox?: () => void }) {
   const v = store.getVersion();
   const d = useMemo(() => derive(), [v]);
   return <TodayView {...d} onStudy={onStudy} onInbox={onInbox} />;
@@ -53,10 +54,11 @@ function derive() {
   });
   const maxF = Math.max(1, ...forecast);
   const top = tree.children.filter((c) => c.due + c.newCount + c.learning > 0).sort((a, b) => b.due - a.due).slice(0, 6);
-  return { pins, tree, stats, queue, counts, now, forecast, maxF, top };
+  const missed = store.missedToday(now); const weakest = store.weakestSystem(now);
+  return { pins, tree, stats, queue, counts, now, forecast, maxF, top, missed, weakest };
 }
 
-function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, top, onStudy, onInbox }: ReturnType<typeof derive> & { onStudy: (path: string, view?: View) => void; onInbox?: () => void }) {
+function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, top, missed, weakest, onStudy, onInbox }: ReturnType<typeof derive> & { onStudy: OnStudy; onInbox?: () => void }) {
   return (
     <div className="screen">
       <div className="row" style={{ marginBottom: 6 }}><YuzuMark /><h1 style={{ margin: 0 }}>Yuzu</h1><div className="grow" />
@@ -80,6 +82,21 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, top,
             <div className="stat"><b>{stats.today}</b><span>reviews today</span></div>
             <div className="stat"><b>{counts.review.toLocaleString()}</b><span>cards learned</span></div>
           </div>
+          {(missed.length >= 3 || weakest) && (
+            <>
+              <h2>Worth a few minutes</h2>
+              {missed.length >= 3 && (
+                <button className="stack" style={{ "--spine": "var(--clay)" } as any} onClick={() => onStudy("", "decks", { preset: missed, title: "Missed today" })}>
+                  <span className="name">Redo today's misses<div className="meta">{missed.length} cards you got wrong today, once more while they're fresh</div></span><span className="muted"><IconPlay /></span>
+                </button>
+              )}
+              {weakest && (
+                <button className="stack" style={{ "--spine": systemColor(weakest.name) } as any} onClick={() => onStudy(weakest.name, "systems")}>
+                  <span className="name">{weakest.name} is slipping<div className="meta">{Math.round(weakest.retention * 100)}% recalled this week over {weakest.n} reviews — a focused session helps</div></span><span className="muted"><IconPlay /></span>
+                </button>
+              )}
+            </>
+          )}
           <h2>Next 7 days</h2>
           <div className="card-box forecast" style={{ height: 108 }}>
             {forecast.map((n, i) => (

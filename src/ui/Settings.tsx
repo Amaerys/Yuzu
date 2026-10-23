@@ -78,6 +78,13 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       <div className="card-box">
         <div className="field"><label>New cards per day</label><input type="number" min={0} max={500} value={s.newPerDay} onChange={(e) => store.saveSettings({ newPerDay: Number(e.target.value) })} /></div>
         <div className="field"><label>Daily review goal</label><input type="number" min={1} max={2000} value={s.dailyGoal} onChange={(e) => store.saveSettings({ dailyGoal: Number(e.target.value) })} /></div>
+        <div className="field"><label>Max due cards per day (0 = no limit)</label><input type="number" min={0} max={5000} value={s.maxReviewsPerDay} onChange={(e) => store.saveSettings({ maxReviewsPerDay: Number(e.target.value) })} /><span className="small muted">With a backlog, keeps each day to a size you will actually finish. The rest waits; nothing is lost.</span></div>
+        <div className="field"><label>Order of due cards</label>
+          <select value={s.dueOrder} onChange={(e) => store.saveSettings({ dueOrder: e.target.value as any })}>
+            <option value="forgotten">Most forgotten first (lowest recall probability)</option>
+            <option value="due">By due date</option>
+            <option value="shuffle">Shuffled</option>
+          </select><span className="small muted">Cards are also spread across systems so neighbours differ.</span></div>
         <div className="field"><label>Desired retention (FSRS)</label>
           <select value={s.scheduler.desiredRetention} onChange={(e) => store.saveSettings({ scheduler: { ...s.scheduler, desiredRetention: Number(e.target.value) } })}>
             {[0.8, 0.85, 0.9, 0.95].map((r) => <option key={r} value={r}>{Math.round(r * 100)}%</option>)}
