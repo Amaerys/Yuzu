@@ -68,5 +68,11 @@ try {
   console.log("A reviews after B's review:", await A.evaluate(() => (window as any).yuzu.reviews.length), "(before", revBefore + ")");
   await B.evaluate(() => (window as any).yuzu.undoLast()); await syncOf(B); await syncOf(A);
   console.log("A reviews after B's undo:", await A.evaluate(() => (window as any).yuzu.reviews.length), "(should be", revBefore + ")");
+  // Shared images: A adds images from a deck file, turns sharing on, syncs; B receives them on its next sync.
+  await A.click("nav.tabs >> text=Settings"); await A.waitForTimeout(300);
+  await A.locator('input[type=file][accept*=apkg]').nth(1).setInputFiles("test/fixtures/legacy-with-media.apkg"); await A.waitForFunction(() => /images added/.test(document.body.innerText), null, { timeout: 60000 });
+  await A.evaluate(() => (window as any).yuzu.saveSettings({ mediaSync: true })); await syncOf(A);
+  console.log("repo media files:", Object.keys(gh.files()).filter((k) => k.startsWith("media/")).length);
+  await syncOf(B); await B.waitForTimeout(500); console.log("B images after sync:", await B.evaluate(() => (window as any).yuzu.media.size));
   console.log("history A:", await A.evaluate(() => [...document.querySelectorAll("details li")].map((l) => l.textContent?.replace(/^.*· /, "")).slice(0, 4)));
 } finally { console.log("errors:", errors.length ? errors : "none"); await browser.close(); server.kill(); }

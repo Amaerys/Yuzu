@@ -13,7 +13,7 @@ export function fakeGitHub(opts: { flaky?: number } = {}) {
     const u = new URL(url); const p = u.pathname.replace(/^\/repos\/o\/r/, ""); const m = init.method ?? "GET";
     const json = (x: any, status = 200) => new Response(JSON.stringify(x), { status });
     const body = init.body ? JSON.parse(init.body as string) : null;
-    if (p === "" && m === "GET") return json({ full_name: "o/r", private: true, default_branch: "main", permissions: { push: true } });
+    if (p === "" && m === "GET") return json({ full_name: "o/r", private: true, default_branch: "main", permissions: { push: true }, size: blobs.size * 10 });
     if (p.startsWith("/contents/") && m === "GET") {
       if (!head) return json({ message: "This repository is empty." }, 404);
       const path = decodeURIComponent(p.slice(10));
@@ -46,5 +46,6 @@ export function fakeGitHub(opts: { flaky?: number } = {}) {
     return new Response("nope " + m + " " + p, { status: 500 });
   };
   const drop = (name: string, content: string) => { const b = sha(); blobs.set(b, Buffer.from(content)); const tree = { ...(head ? trees.get(commits.get(head)!.tree)! : {}) }; tree["inbox/" + name] = b; const t = sha(); trees.set(t, tree); const c = sha(); commits.set(c, { tree: t, parents: head ? [head] : [] }); head = c; };
-  return { fetchImpl, files: () => (head ? trees.get(commits.get(head)!.tree)! : {}), commits: () => commits.size, calls: () => calls, setFlaky: (k: number) => { flaky = k; }, drop };
+  const parentsOfHead = () => (head ? commits.get(head)!.parents : []);
+  return { parentsOfHead, fetchImpl, files: () => (head ? trees.get(commits.get(head)!.tree)! : {}), commits: () => commits.size, calls: () => calls, setFlaky: (k: number) => { flaky = k; }, drop };
 }

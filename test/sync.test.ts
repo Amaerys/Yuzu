@@ -111,3 +111,15 @@ test("large shards are stored gzip-compressed and round-trip; changing one card 
   const r2 = await A.push(s2.hashes, s2.make, (await A.pullManifest())!, "A");
   assert.equal(r2.pushed, 1); assert.ok(r2.bytes < 20000, `one review should upload a few KB, got ${r2.bytes}`);
 });
+
+test("history compaction folds the branch into one parentless commit holding the same files", async () => {
+  const gh = fakeGitHub(); const A = client(gh);
+  let cards = [mkCard("1", 1)];
+  for (let i = 0; i < 4; i++) { cards = [...cards, mkCard(String(i + 2), i + 2)]; const sh = await GitHubSync.shard({ notetypes: [], notes: [], cards, reviews: [], settings: { updatedAt: i } }); await A.push(sh.hashes, sh.make, await A.pullManifest(), "A", undefined, { notes: 0, cards: cards.length, reviews: 0 }); }
+  const before = Object.keys(gh.files()).length; const man = (await A.pullManifest())!;
+  assert.equal(man.commits, 4); assert.equal(man.counts?.cards, 5); assert.ok(gh.parentsOfHead().length === 1);
+  assert.equal(await A.compact("A"), true);
+  assert.deepEqual(gh.parentsOfHead(), [], "orphan commit"); assert.equal(Object.keys(gh.files()).length, before, "same files");
+  const after = (await A.pullManifest())!; assert.equal(after.commits, 0);
+  const got = await A.pullChanged(after, {}); assert.equal(got.cards!.length, 5);
+});

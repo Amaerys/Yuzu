@@ -8,7 +8,7 @@ import { parsePack, describePack } from "../import/pack";
 import { noteTitle } from "./render";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, type MediaEnv } from "../import/media";
-import { GitHubSync, SyncError, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
+import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
 export interface Settings {
   newPerDay: number;
@@ -33,13 +33,17 @@ export interface Settings {
   /** Boss fight results per node key (view:path). */
   bosses: Record<string, { at: number; score: number; best: number; passed: boolean }>;
   typeAnswers: boolean;
+  /** Share deck images through the sync repository (synced setting). */
+  mediaSync: boolean;
+  /** Fetch shared images onto this device (per device). */
+  mediaDownload: boolean;
   smart: SmartDeck[];
   sync: { owner: string; repo: string; token: string; auto: boolean };
 }
 export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, maxReviewsPerDay: 0, dueOrder: "forgotten", rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
-  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, bosses: {}, typeAnswers: true,
+  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true,
 };
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
 export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number; pending?: boolean }
@@ -60,6 +64,8 @@ export interface Stats { today: number; goal: number; streak: number }
 type Listener = () => void;
 
 /** Spread cards so neighbours rarely share a group (system / deck): interleaving helps discrimination. Keeps the overall order roughly intact. */
+function hashName(s: string): string { let h1 = 0x811c9dc5, h2 = 0x01000193; for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); h1 = Math.imul(h1 ^ c, 16777619); h2 = Math.imul(h2 ^ c, 2246822507); } return (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0"); }
+
 export function interleaveBySystem<T>(list: T[], groupOf: (x: T) => string): T[] {
   if (list.length < 3) return list;
   const out: T[] = []; const pending = [...list];
@@ -88,6 +94,7 @@ export class Store {
   private syncAgain = false;
   private shardCache: ShardCache = new Map();
   syncLog: SyncLogEntry[] = [];
+  private mediaCapWarned = false;
   private listeners = new Set<Listener>();
   private version = 0;
   private treeCache = new Map<View, { v: number; tree: TreeNode }>();
@@ -122,9 +129,12 @@ export class Store {
       for (let attempt = 0; attempt < 3; attempt++) {
         const known = await db.getMeta<Record<string, string>>("syncKnown", {});
         const remote = await gh.pullManifest();
-        let pulledN = 0, pulledC = 0, pulledR = 0;
+        let pulledN = 0, pulledC = 0, pulledR = 0; let got: Awaited<ReturnType<GitHubSync["pullChanged"]>> | null = null;
+        // Fast path: nothing changed here and the repository is exactly what we last saw → two requests and done.
+        const lastSeen = await db.getMeta<number>("syncSeenAt", 0);
+        if (!this.dirty && remote && remote.updatedAt === lastSeen && this.shardCache.size) { summary = "Up to date"; break; }
         if (remote) {
-          const got = await gh.pullChanged(remote, known, progress);
+          got = await gh.pullChanged(remote, known, progress);
           progress("Merging");
           if (got.notetypes) { for (const nt of got.notetypes) this.notetypes.set(nt.id, nt); await db.putMany("notetypes", got.notetypes); }
           if (got.tombstones) {
@@ -142,22 +152,56 @@ export class Store {
           if (got.cards) { const changed: Card[] = []; for (const c of got.cards) { const l = this.cards.get(c.id); if ((this.tombstones["c:" + c.id] ?? -1) >= (c.mod ?? c.lastReview) || (this.tombstones["n:" + c.nid] ?? -1) >= (c.mod ?? c.lastReview)) continue; if (!l || (c.mod ?? c.lastReview) > (l.mod ?? l.lastReview)) changed.push(c); } pulledC = mergeCards(this.cards, got.cards, this.tombstones); await db.putMany("cards", changed); }
           if (got.reviews) { const m = mergeReviews(this.reviews, got.reviews, this.tombstones); pulledR = m.added; if (m.added) { const ids = new Set(this.reviews.map((r) => r.id)); await db.putMany("reviews", got.reviews.filter((r) => !ids.has(r.id))); this.reviews = m.list; } }
           if (got.settings && (got.settings as any).updatedAt > ((this.settings as any).updatedAt ?? 0)) {
-            const { sync: _s, deviceName: _d, nightCards: _n, swipe: _w, typeAnswers: _t, ...rest } = got.settings as any; // per-device fields stay local
+            const { sync: _s, deviceName: _d, nightCards: _n, swipe: _w, typeAnswers: _t, mediaDownload: _m, ...rest } = got.settings as any; // per-device fields stay local
             this.settings = { ...this.settings, ...rest }; await db.setMeta("settings", this.settings);
           }
           if (got.media) { const blobs: { name: string; blob: Blob }[] = []; for (const [name, url] of Object.entries(got.media as Record<string, string>)) { if (this.media.has(name)) continue; const blob = await (await fetch(url)).blob(); this.media.set(name, blob); blobs.push({ name, blob }); } if (blobs.length) { await db.putMany("media", blobs); this.mediaUrls.clear(); } }
           if (pulledN + pulledC + pulledR) this.treeCache.clear();
         }
         await this.checkInbox(gh);
+        // Shared images: merge the repository's index, pick what to upload from here (bounded per sync).
+        let mediaIndex: MediaIndex = { ...(await db.getMeta<MediaIndex>("mediaIndex", {})), ...(got?.mediaIndex ?? {}) };
+        const mediaBlobs: { path: string; bytes: Uint8Array }[] = [];
+        if (this.settings.mediaSync) {
+          let budget = MEDIA_BATCH_BYTES; let total = Object.values(mediaIndex).reduce((a, v) => a + v.s, 0);
+          for (const [name, blob] of this.media) {
+            if (budget <= 0) break;
+            if (total + blob.size > 900 * 1048576) { if (!this.mediaCapWarned) { this.mediaCapWarned = true; this.log(false, "Shared images reached 900 MB; further images stay on this device only", 0); } break; }
+            total += blob.size;
+            if (name.startsWith("pack-") || mediaIndex[name] || !/\.(png|jpe?g|gif|webp|svg|avif)$/i.test(name) || blob.size > 4 * 1048576) continue;
+            const ext = name.split(".").pop()!.toLowerCase(); const path = `media/${hashName(name)}.${blob.type === "image/webp" ? "webp" : ext}`;
+            mediaBlobs.push({ path, bytes: new Uint8Array(await blob.arrayBuffer()) }); mediaIndex = { ...mediaIndex, [name]: { p: path, s: blob.size } }; budget -= blob.size;
+          }
+        }
         progress("Preparing upload");
+        if (!this.shardCache.size) { const saved = await db.getMeta<[string, { fp: string; hash: string }][]>("shardCache", []); for (const [k, v] of saved) this.shardCache.set(k, v); }
         const { hashes, make } = await GitHubSync.shard({
-          notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(),
+          notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(), mediaIndex,
           settings: { ...this.settings, sync: undefined, updatedAt: (this.settings as any).updatedAt ?? 0 },
         }, this.shardCache);
         try {
-          const res = await gh.push(hashes, make, remote, this.settings.deviceName, progress);
-          await db.setMeta("syncKnown", res.manifest.files);
+          const counts = { notes: this.notes.size, cards: this.cards.size, reviews: this.reviews.length };
+          const res = await gh.push(hashes, make, remote, this.settings.deviceName, progress, counts, mediaBlobs);
+          await db.setMeta("syncKnown", res.manifest.files); await db.setMeta("syncSeenAt", res.manifest.updatedAt); await db.setMeta("mediaIndex", mediaIndex);
+          // Shared images missing here: fetch a batch now; the rest on the next sync.
+          if (this.settings.mediaDownload) {
+            const missing = Object.entries(mediaIndex).filter(([name]) => !this.media.has(name)); let budget = MEDIA_BATCH_BYTES, done = 0; const got2: { name: string; blob: Blob }[] = [];
+            const q = missing.filter(([, v]) => { if (budget - v.s < 0) return false; budget -= v.s; return true; });
+            await Promise.all(Array.from({ length: 4 }, async () => { while (q.length) { const [name, v] = q.shift()!; try { const bytes = await gh.readBinary(v.p); if (bytes) { const blob = new Blob([bytes as BlobPart], { type: v.p.endsWith(".webp") ? "image/webp" : "image/*" }); this.media.set(name, blob); got2.push({ name, blob }); } } catch { /* next time */ } progress(`Downloading images ${++done}/${q.length + done}`); } }));
+            if (got2.length) { await db.putMany("media", got2); this.mediaUrls.clear(); }
+            if (missing.length > got2.length) this.scheduleSync(4000); // keep going in the background
+            if (got2.length) this.log(true, `${got2.length} shared images downloaded`, 0);
+          }
+          await db.setMeta("shardCache", [...this.shardCache.entries()]);
           this.dirty = false; await db.setMeta("syncDirty", false);
+          // Accuracy check: after a sync both sides must describe the same collection.
+          const rc = res.manifest.counts;
+          if (rc && !res.pushed && (rc.notes !== counts.notes || rc.cards !== counts.cards || rc.reviews !== counts.reviews)) {
+            await db.setMeta("syncKnown", {}); this.dirty = true; await db.setMeta("syncDirty", true);
+            throw new SyncError(`This device differs from the repository (${counts.cards.toLocaleString()} vs ${rc.cards.toLocaleString()} cards); the next sync re-checks every file.`, "other");
+          }
+          // Keep the repository from growing forever: every COMPACT_EVERY commits, fold the history into one commit.
+          if ((res.manifest.commits ?? 0) >= COMPACT_EVERY) { progress("Compacting history"); try { if (await gh.compact(this.settings.deviceName)) this.log(true, "History compacted", 0); } catch { /* next time */ } }
           const parts = [];
           if (pulledN + pulledC + pulledR) parts.push(`pulled ${pulledC.toLocaleString()} cards, ${pulledR.toLocaleString()} reviews`);
           if (res.pushed) parts.push(`pushed ${res.pushed} files (${res.bytes > 1048576 ? (res.bytes / 1048576).toFixed(1) + " MB" : Math.round(res.bytes / 1024) + " KB"})`);
@@ -181,7 +225,16 @@ export class Store {
     }
   }
   /** Forget the known remote hashes and the shard cache so the next sync compares everything again. */
-  async resetSyncState() { await db.setMeta("syncKnown", {}); this.shardCache.clear(); this.dirty = true; await db.setMeta("syncDirty", true); }
+  async resetSyncState() { await db.setMeta("syncKnown", {}); await db.setMeta("syncSeenAt", 0); await db.setMeta("shardCache", []); this.shardCache.clear(); this.dirty = true; await db.setMeta("syncDirty", true); }
+  /** Compact the repository's history now (Settings). */
+  async compactNow(): Promise<string> {
+    if (!this.syncConfigured()) return "Sync is not set up";
+    const gh = new GitHubSync({ owner: this.settings.sync.owner, repo: this.settings.sync.repo, token: this.settings.sync.token });
+    await gh.pullManifest();
+    const before = await gh.repoSizeMB();
+    const ok = await gh.compact(this.settings.deviceName);
+    return ok ? `History compacted${before != null ? ` (repository was ${before.toFixed(0)} MB; GitHub reclaims the rest within a few days)` : ""}.` : "Another device was syncing; try again in a minute.";
+  }
   private log(ok: boolean, message: string, ms: number) {
     this.syncLog = [{ at: Date.now(), ok, message, ms }, ...this.syncLog].slice(0, 20);
     db.setMeta("syncLog", this.syncLog).catch(() => {});

@@ -11,15 +11,28 @@
 import type { Card, Note, Notetype, Review } from "./model";
 
 export interface SyncConfig { owner: string; repo: string; token: string; branch?: string }
-export interface Manifest { version: 1; files: Record<string, string>; updatedAt: number; device?: string; /** logical path → stored path, for gzip-compressed files */ stored?: Record<string, string> }
+export interface Manifest {
+  version: 1; files: Record<string, string>; updatedAt: number; device?: string;
+  /** logical path → stored path, for gzip-compressed files */
+  stored?: Record<string, string>;
+  /** record counts at the time of writing, so a device can verify it holds the same collection */
+  counts?: { notes: number; cards: number; reviews: number };
+  /** commits since the history was last compacted */
+  commits?: number;
+}
 
 export interface SyncSnapshot {
   notetypes: Notetype[]; notes: Note[]; cards: Card[]; reviews: Review[]; settings: Record<string, unknown>;
   /** Deleted records: "n:<noteId>" / "c:<cardId>" → time of deletion. A tombstone beats any record modified before it. */
   tombstones?: Record<string, number>;
-  /** Small pack images as data URLs (name → data URL). Deck media is per device and never synced. */
+  /** Small pack images as data URLs (name → data URL). */
   media?: Record<string, string>;
+  /** Shared deck images: file name → stored path in the repo and size. Written as media/index.json. */
+  mediaIndex?: Record<string, { p: string; s: number }>;
 }
+export type MediaIndex = NonNullable<SyncSnapshot["mediaIndex"]>;
+/** Per sync, at most this many bytes of shared images go up or come down, so a sync never takes minutes. */
+export const MEDIA_BATCH_BYTES = 15 * 1048576;
 export type Progress = (message: string) => void;
 
 export const NOTE_SHARDS = 128, CARD_SHARDS = 256;
@@ -134,6 +147,14 @@ export class GitHubSync {
   /** Head commit seen by the last pullManifest(); push() refuses to build on a different one (another device synced in between). */
   private seenHead: string | null | undefined = undefined;
 
+  /** Download a binary file stored in the repository (shared images). */
+  async readBinary(path: string): Promise<Uint8Array | null> {
+    const res = await this.request(`${this.base}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${this.branch}`, { headers: this.headers({ Accept: "application/vnd.github.raw+json" }) });
+    if (res.status === 404) return null;
+    if (!res.ok) throw await this.explain(res, `download ${path}`);
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
   async pullManifest(): Promise<Manifest | null> {
     const ref = await this.api(`/git/ref/heads/${this.branch}`);
     this.seenHead = ref?.object?.sha ?? null;
@@ -159,6 +180,7 @@ export class GitHubSync {
     await emit("settings.json", JSON.stringify(snap.settings), () => JSON.stringify(snap.settings));
     const media = snap.media ?? {};
     if (Object.keys(media).length) await emit("media.json", "m" + Object.keys(media).sort().join(","), () => JSON.stringify(media));
+    if (snap.mediaIndex && Object.keys(snap.mediaIndex).length) await emit("media/index.json", "i" + Object.keys(snap.mediaIndex).length + ":" + Object.values(snap.mediaIndex).reduce((a, b) => a + b.s, 0), () => JSON.stringify(snap.mediaIndex));
     const tombs = snap.tombstones ?? {};
     if (Object.keys(tombs).length) await emit("tombstones.json", "t" + Object.keys(tombs).length + ":" + Object.values(tombs).reduce((a, b) => a + b, 0), () => JSON.stringify(tombs));
     const notes: Note[][] = Array.from({ length: NOTE_SHARDS }, () => []);
@@ -204,6 +226,7 @@ export class GitHubSync {
       else if (p === "settings.json") out.settings = data;
       else if (p === "tombstones.json") out.tombstones = data;
       else if (p === "media.json") out.media = data;
+      else if (p === "media/index.json") out.mediaIndex = data;
       else if (p.startsWith("notes/")) out.notes = (out.notes ?? []).concat(data);
       else if (p.startsWith("cards/")) out.cards = (out.cards ?? []).concat(data);
       else if (p.startsWith("reviews/")) out.reviews = (out.reviews ?? []).concat(data);
@@ -229,30 +252,35 @@ export class GitHubSync {
   }
 
   /** Commit the given files (only those whose hash differs from the remote manifest). Returns the new manifest. */
-  async push(hashes: Record<string, string>, make: (path: string) => string, remote: Manifest | null, device: string, progress?: Progress): Promise<{ manifest: Manifest; commit: string | null; pushed: number; bytes: number }> {
+  async push(hashes: Record<string, string>, make: (path: string) => string, remote: Manifest | null, device: string, progress?: Progress, counts?: Manifest["counts"], blobs: { path: string; bytes: Uint8Array }[] = []): Promise<{ manifest: Manifest; commit: string | null; pushed: number; bytes: number }> {
     const toWrite = Object.keys(hashes).filter((p) => !remote || remote.files[p] !== hashes[p]);
     const stored: Record<string, string> = { ...(remote?.stored ?? {}) };
     for (const p of Object.keys(stored)) if (!(p in hashes)) delete stored[p];
     const realOf = (p: string) => stored[p] ?? p;
     const toDelete = remote ? Object.keys(remote.files).filter((p) => !(p in hashes)).map((p) => remote.stored?.[p] ?? p) : [];
-    const manifest: Manifest = { version: 1, files: hashes, updatedAt: Date.now(), device, stored };
-    if (!toWrite.length && !toDelete.length) return { manifest: remote ?? manifest, commit: null, pushed: 0, bytes: 0 };
+    const manifest: Manifest = { version: 1, files: hashes, updatedAt: Date.now(), device, stored, counts, commits: (remote?.commits ?? 0) + 1 };
+    if (!toWrite.length && !toDelete.length && !blobs.length) return { manifest: remote ?? manifest, commit: null, pushed: 0, bytes: 0 };
     const baseCommit = await this.head();
     if (this.seenHead !== undefined && this.seenHead !== null && baseCommit !== this.seenHead) throw new SyncError("Another device synced in the meantime", "conflict");
     const baseTree = baseCommit ? (await this.api(`/git/commits/${baseCommit}`, {}, "read the last commit"))?.tree?.sha ?? null : null;
     const tree: any[] = [];
     let n = 0, bytes = 0;
-    for (const p of toWrite) {
-      progress?.(`Uploading ${++n}/${toWrite.length}`);
+    // Upload blobs four at a time; order in the tree does not matter.
+    const queue = [...toWrite];
+    const uploadOne = async (p: string) => {
       const json = make(p);
       let content: string; let real = p;
       if (json.length > GZIP_ABOVE) { const gz = await gzip(json); content = bytesToBase64(gz); real = p + ".gz"; bytes += gz.length; } else { content = utf8ToBase64(json); bytes += json.length; }
       const prevReal = realOf(p);
+      const blob = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content, encoding: "base64" }) }, `upload ${p}`);
       if (prevReal !== real) tree.push({ path: prevReal, mode: "100644", type: "blob", sha: null }); // compression state changed: drop the old file
       if (real !== p) stored[p] = real; else delete stored[p];
-      const blob = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content, encoding: "base64" }) }, `upload ${p}`);
       tree.push({ path: real, mode: "100644", type: "blob", sha: blob.sha });
-    }
+      progress?.(`Uploading ${++n}/${toWrite.length}`);
+    };
+    await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) await uploadOne(queue.shift()!); }));
+    const bq = [...blobs]; let bn = 0;
+    await Promise.all(Array.from({ length: 4 }, async () => { while (bq.length) { const b = bq.shift()!; const r = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content: bytesToBase64(b.bytes), encoding: "base64" }) }, `upload ${b.path}`); tree.push({ path: b.path, mode: "100644", type: "blob", sha: r.sha }); bytes += b.bytes.length; progress?.(`Uploading images ${++bn}/${blobs.length}`); } }));
     for (const p of toDelete) tree.push({ path: p, mode: "100644", type: "blob", sha: null });
     manifest.stored = stored;
     const mblob = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content: utf8ToBase64(JSON.stringify(manifest)), encoding: "base64" }) }, "upload the manifest");
@@ -261,9 +289,32 @@ export class GitHubSync {
     const commit = await this.api("/git/commits", { method: "POST", body: JSON.stringify({ message: `Yuzu sync from ${device || "device"} (${toWrite.length} files)`, tree: newTree.sha, parents: baseCommit ? [baseCommit] : [] }) }, "create the commit");
     if (baseCommit) await this.api(`/git/refs/heads/${this.branch}`, { method: "PATCH", body: JSON.stringify({ sha: commit.sha, force: false }) }, "advance the branch");
     else await this.api("/git/refs", { method: "POST", body: JSON.stringify({ ref: `refs/heads/${this.branch}`, sha: commit.sha }) }, "create the branch");
-    return { manifest, commit: commit.sha, pushed: toWrite.length, bytes };
+    this.seenHead = commit.sha;
+    return { manifest, commit: commit.sha, pushed: toWrite.length + blobs.length, bytes };
   }
+
+  /** Fold the whole history into one commit holding the current tree. Old objects become unreachable and GitHub
+   *  reclaims them, so the repository stays the size of the collection instead of growing with every sync. */
+  async compact(device: string): Promise<boolean> {
+    const headSha = await this.api(`/git/ref/heads/${this.branch}`).then((r: any) => r?.object?.sha ?? null);
+    if (!headSha || (this.seenHead && headSha !== this.seenHead)) return false; // someone else is syncing; try another time
+    const treeSha = (await this.api(`/git/commits/${headSha}`, {}, "read the last commit"))?.tree?.sha; if (!treeSha) return false;
+    const manifestText = await this.readFile("manifest.json"); if (!manifestText) return false;
+    const m = JSON.parse(manifestText) as Manifest; m.commits = 0; m.updatedAt = Date.now();
+    const mblob = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content: utf8ToBase64(JSON.stringify(m)), encoding: "base64" }) }, "upload the manifest");
+    const newTree = await this.api("/git/trees", { method: "POST", body: JSON.stringify({ base_tree: treeSha, tree: [{ path: "manifest.json", mode: "100644", type: "blob", sha: mblob.sha }] }) }, "build the commit");
+    const commit = await this.api("/git/commits", { method: "POST", body: JSON.stringify({ message: `Yuzu: history compacted from ${device || "device"}`, tree: newTree.sha, parents: [] }) }, "create the commit");
+    await this.api(`/git/refs/heads/${this.branch}`, { method: "PATCH", body: JSON.stringify({ sha: commit.sha, force: true }) }, "rewrite the branch");
+    this.seenHead = commit.sha;
+    return true;
+  }
+
+  /** Repository size in MB as GitHub reports it (includes unreachable objects until GitHub's next cleanup). */
+  async repoSizeMB(): Promise<number | null> { const r = await this.api(""); return r?.size != null ? r.size / 1024 : null; }
 }
+
+/** How many commits a repository accumulates before Yuzu folds its history into a single commit. */
+export const COMPACT_EVERY = 300;
 
 /** Union of tombstones (later deletion time wins). */
 export function mergeTombstones(local: Record<string, number>, remote: Record<string, number>): Record<string, number> {

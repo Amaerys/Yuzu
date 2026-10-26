@@ -144,6 +144,9 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           <button className="btn" disabled={busy} onClick={async () => { if (confirm("Remove all deck images from this device? Cards keep working, images show as placeholders until added again.")) setResult(`Removed ${await store.clearMedia()} images.`); }}>Remove</button>
         </div>
         {mediaMsg && <p className="small" style={{ marginBottom: 0 }}>{mediaMsg}</p>}
+        <label className="row small" style={{ margin: "12px 0 6px" }}><input type="checkbox" checked={s.mediaSync} onChange={(e) => store.saveSettings({ mediaSync: e.target.checked })} /> Share images between devices through the sync repository</label>
+        <label className="row small" style={{ margin: "6px 0 0" }}><input type="checkbox" checked={s.mediaDownload} onChange={(e) => store.saveSettings({ mediaDownload: e.target.checked })} /> Download shared images on this device</label>
+        <p className="small muted" style={{ marginBottom: 0 }}>Images move 15 MB per sync, in the background, up to about 900 MB in total. Add images on the PC once, switch sharing on, and the phone picks them up over the next syncs; switch "download" off on a device that should stay small.</p>
       </div>
 
       <h2>Inbox</h2>
@@ -171,7 +174,11 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
             <ul className="small" style={{ margin: "6px 0 0", paddingLeft: 18 }}>
               {store.syncLog.map((l) => <li key={l.at} className={l.ok ? "" : "muted"}>{new Date(l.at).toLocaleString()} · {l.ok ? "✓" : "✗"} {l.message} ({(l.ms / 1000).toFixed(1)} s)</li>)}
             </ul>
-            <button className="btn" style={{ marginTop: 8 }} onClick={async () => { if (confirm("Forget what has been synced and compare everything with the repository again? Nothing is deleted; the next sync re-downloads and re-uploads changed files.")) { await store.resetSyncState(); store.sync(); } }}>Re-check everything</button>
+            <div className="row" style={{ marginTop: 8 }}>
+              <button className="btn" onClick={async () => { if (confirm("Forget what has been synced and compare everything with the repository again? Nothing is deleted; the next sync re-downloads and re-uploads changed files.")) { await store.resetSyncState(); store.sync(); } }}>Re-check everything</button>
+              <button className="btn" onClick={async () => { setSyncMsg("Compacting…"); setSyncMsg(await store.compactNow()); }}>Compact history</button>
+            </div>
+            <p className="small muted" style={{ marginBottom: 0 }}>Compacting folds the repository's history into one commit so it stays the size of your collection; Yuzu does this by itself every 300 syncs.</p>
           </details>
         )}
       </div>
