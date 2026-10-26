@@ -67,7 +67,7 @@ function utf8ToBase64(s: string): string {
 }
 
 export class SyncError extends Error {
-  constructor(message: string, public kind: "auth" | "notfound" | "conflict" | "network" | "ratelimit" | "other" = "other") { super(message); }
+  constructor(message: string, public kind: "auth" | "notfound" | "conflict" | "network" | "ratelimit" | "busy" | "other" = "other") { super(message); }
 }
 
 /** Cache of shard fingerprints: path → { fp (fingerprint of the records), hash of the JSON }. The JSON itself is not kept. */
@@ -132,6 +132,26 @@ export class GitHubSync {
     if (!res.ok) throw await this.explain(res, `read ${path}`);
     if (real.endsWith(".gz")) return gunzip(new Uint8Array(await res.arrayBuffer()));
     return res.text();
+  }
+
+  /** Sync lock: one device uploads at a time. Others wait instead of colliding and redoing the work. Expires on its own. */
+  static LOCK_MS = 12 * 60000;
+  async acquireLock(device: string): Promise<{ held: boolean; by?: string }> {
+    const cur = await this.api(`/contents/lock.json?ref=${this.branch}`);
+    if (cur?.content) {
+      try { const l = JSON.parse(atob(cur.content.replace(/\n/g, ""))); if (l.until > Date.now() && l.device !== device) return { held: false, by: l.device || "another device" }; } catch { /* broken lock: take over */ }
+    }
+    const body = { message: `Yuzu: ${device || "device"} syncing`, content: utf8ToBase64(JSON.stringify({ device, until: Date.now() + GitHubSync.LOCK_MS })), branch: this.branch, ...(cur?.sha ? { sha: cur.sha } : {}) };
+    const r = await this.api(`/contents/lock.json`, { method: "PUT", body: JSON.stringify(body) }, "take the sync lock");
+    this.lockSha = r?.content?.sha ?? null;
+    return { held: true };
+  }
+  private lockSha: string | null = null;
+  private blobCache = new Map<string, string>();
+  /** Remove the lock outside the normal push (error path). The push itself deletes lock.json in its commit. */
+  async releaseLock(): Promise<void> {
+    try { const cur = await this.api(`/contents/lock.json?ref=${this.branch}`); if (cur?.sha) await this.api(`/contents/lock.json`, { method: "DELETE", body: JSON.stringify({ message: "Yuzu: sync lock released", sha: cur.sha, branch: this.branch }) }, "release the sync lock"); } catch { /* expires anyway */ }
+    this.lockSha = null;
   }
 
   /** Files waiting in inbox/ (packs dropped there by Claude or by hand). */
@@ -216,7 +236,7 @@ export class GitHubSync {
         const [p] = queue.shift()!;
         const t = await this.readFile(p, manifest.stored);
         if (t != null) { try { parsed.push([p, JSON.parse(t)]); } catch { throw new SyncError(`${p} in the repository is corrupt; sync stopped without changing anything`, "other"); } }
-        doneCount++; progress?.(`Downloading ${doneCount}/${changed.length}`);
+        doneCount++; progress?.(`Downloading ${doneCount} of ${changed.length} changed files`);
       }
     });
     await Promise.all(workers);
@@ -265,31 +285,52 @@ export class GitHubSync {
     const baseTree = baseCommit ? (await this.api(`/git/commits/${baseCommit}`, {}, "read the last commit"))?.tree?.sha ?? null : null;
     const tree: any[] = [];
     let n = 0, bytes = 0;
-    // Upload blobs four at a time; order in the tree does not matter.
-    const queue = [...toWrite];
-    const uploadOne = async (p: string) => {
-      const json = make(p);
-      let content: string; let real = p;
-      if (json.length > GZIP_ABOVE) { const gz = await gzip(json); content = bytesToBase64(gz); real = p + ".gz"; bytes += gz.length; } else { content = utf8ToBase64(json); bytes += json.length; }
-      const prevReal = realOf(p);
-      const blob = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content, encoding: "base64" }) }, `upload ${p}`);
-      if (prevReal !== real) tree.push({ path: prevReal, mode: "100644", type: "blob", sha: null }); // compression state changed: drop the old file
-      if (real !== p) stored[p] = real; else delete stored[p];
-      tree.push({ path: real, mode: "100644", type: "blob", sha: blob.sha });
-      progress?.(`Uploading ${++n}/${toWrite.length}`);
-    };
-    await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) await uploadOne(queue.shift()!); }));
+    const total = toWrite.length;
+    const label = (k: number) => (total >= 20 ? `Uploading ${k} of ${total} changed files (first sync in a new layout sends everything once)` : `Uploading ${k} of ${total} changed files`);
+    if (total >= 20) {
+      // Bulk mode: many files → send them inline in a few large tree requests instead of one blob request per file.
+      let baseTreeSha = baseTree; const CHUNK = 4 * 1048576; let chunk: any[] = []; let size = 0;
+      const flush = async () => { if (!chunk.length) return; const t = await this.api("/git/trees", { method: "POST", body: JSON.stringify({ base_tree: baseTreeSha ?? undefined, tree: chunk }) }, "upload a batch of files"); baseTreeSha = t.sha; chunk = []; size = 0; };
+      for (const p of toWrite) {
+        const json = make(p); bytes += json.length;
+        const prevReal = realOf(p); if (prevReal !== p) { chunk.push({ path: prevReal, mode: "100644", type: "blob", sha: null }); delete stored[p]; }
+        chunk.push({ path: p, mode: "100644", type: "blob", content: json }); size += json.length; n++;
+        if (size >= CHUNK) { await flush(); progress?.(label(n)); }
+      }
+      await flush(); progress?.(label(n));
+      // the remaining entries (deletions, images, manifest) go on top of the last batch tree
+      (this as any)._bulkBase = baseTreeSha;
+    } else {
+      // Upload blobs four at a time; order in the tree does not matter. Blobs already uploaded in this session (retry after a conflict) are reused.
+      const queue = [...toWrite];
+      const uploadOne = async (p: string) => {
+        const json = make(p);
+        let content: string; let real = p;
+        if (json.length > GZIP_ABOVE) { const gz = await gzip(json); content = bytesToBase64(gz); real = p + ".gz"; bytes += gz.length; } else { content = utf8ToBase64(json); bytes += json.length; }
+        const prevReal = realOf(p);
+        const key = hashes[p] + (real.endsWith(".gz") ? ".gz" : "");
+        let sha = this.blobCache.get(key);
+        if (!sha) { const blob = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content, encoding: "base64" }) }, `upload ${p}`); sha = blob.sha as string; this.blobCache.set(key, sha); }
+        if (prevReal !== real) tree.push({ path: prevReal, mode: "100644", type: "blob", sha: null }); // compression state changed: drop the old file
+        if (real !== p) stored[p] = real; else delete stored[p];
+        tree.push({ path: real, mode: "100644", type: "blob", sha });
+        progress?.(label(++n));
+      };
+      await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) await uploadOne(queue.shift()!); }));
+    }
     const bq = [...blobs]; let bn = 0;
-    await Promise.all(Array.from({ length: 4 }, async () => { while (bq.length) { const b = bq.shift()!; const r = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content: bytesToBase64(b.bytes), encoding: "base64" }) }, `upload ${b.path}`); tree.push({ path: b.path, mode: "100644", type: "blob", sha: r.sha }); bytes += b.bytes.length; progress?.(`Uploading images ${++bn}/${blobs.length}`); } }));
+    await Promise.all(Array.from({ length: 4 }, async () => { while (bq.length) { const b = bq.shift()!; const r = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content: bytesToBase64(b.bytes), encoding: "base64" }) }, `upload ${b.path}`); tree.push({ path: b.path, mode: "100644", type: "blob", sha: r.sha }); bytes += b.bytes.length; progress?.(`Uploading images ${++bn} of ${blobs.length}`); } }));
+    if (this.lockSha) tree.push({ path: "lock.json", mode: "100644", type: "blob", sha: null });
     for (const p of toDelete) tree.push({ path: p, mode: "100644", type: "blob", sha: null });
     manifest.stored = stored;
     const mblob = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content: utf8ToBase64(JSON.stringify(manifest)), encoding: "base64" }) }, "upload the manifest");
     tree.push({ path: "manifest.json", mode: "100644", type: "blob", sha: mblob.sha });
-    const newTree = await this.api("/git/trees", { method: "POST", body: JSON.stringify({ base_tree: baseTree ?? undefined, tree }) }, "build the commit");
+    const newTree = await this.api("/git/trees", { method: "POST", body: JSON.stringify({ base_tree: ((this as any)._bulkBase ?? baseTree) ?? undefined, tree }) }, "build the commit");
+    (this as any)._bulkBase = undefined;
     const commit = await this.api("/git/commits", { method: "POST", body: JSON.stringify({ message: `Yuzu sync from ${device || "device"} (${toWrite.length} files)`, tree: newTree.sha, parents: baseCommit ? [baseCommit] : [] }) }, "create the commit");
     if (baseCommit) await this.api(`/git/refs/heads/${this.branch}`, { method: "PATCH", body: JSON.stringify({ sha: commit.sha, force: false }) }, "advance the branch");
     else await this.api("/git/refs", { method: "POST", body: JSON.stringify({ ref: `refs/heads/${this.branch}`, sha: commit.sha }) }, "create the branch");
-    this.seenHead = commit.sha;
+    this.seenHead = commit.sha; this.lockSha = null;
     return { manifest, commit: commit.sha, pushed: toWrite.length + blobs.length, bytes };
   }
 

@@ -19,6 +19,7 @@ async function device(name: string) {
   return page;
 }
 const status = (page: any) => page.evaluate(() => [...document.querySelectorAll("p.small")].map((p) => p.textContent ?? "").find((t) => /pushed|pulled|Up to date|Syncing|Download|Upload|rejected|Another|Offline|Conflict|GitHub \d/.test(t)));
+const syncOf = async (p: any) => { await p.evaluate(async () => { const y = (window as any).yuzu; while (y.syncStatus.state === "syncing") await new Promise((r) => setTimeout(r, 100)); await y.sync(); }); };
 const counts = (page: any) => page.evaluate(() => document.body.innerText.match(/[\d,]+ notes · [\d,]+ cards · [\d,]+ reviews/)?.[0]);
 try {
   const A = await device("A");
@@ -47,23 +48,24 @@ try {
   await study(A, ["good"]); await study(B, ["again"]);
   await A.click("nav.tabs >> text=Settings"); await B.click("nav.tabs >> text=Settings"); await A.waitForTimeout(300);
   await Promise.all([A.click("text=Sync now"), B.click("text=Sync now")]);
-  await A.waitForFunction(() => /pushed|Up to date|pulled/.test([...document.querySelectorAll("p.small")].map((p) => p.textContent).join(" ")) && !/Syncing/.test(document.body.innerText), null, { timeout: 60000 });
-  await B.waitForFunction(() => /pushed|Up to date|pulled/.test([...document.querySelectorAll("p.small")].map((p) => p.textContent).join(" ")) && !/Syncing/.test(document.body.innerText), null, { timeout: 60000 });
+  const settled = /pushed|Up to date|pulled|retry in a minute/;
+  await A.waitForFunction((re) => re.test([...document.querySelectorAll("p.small")].map((p) => p.textContent).join(" ")) && !/Syncing/.test(document.body.innerText), settled, { timeout: 60000 });
+  await B.waitForFunction((re) => re.test([...document.querySelectorAll("p.small")].map((p) => p.textContent).join(" ")) && !/Syncing/.test(document.body.innerText), settled, { timeout: 60000 });
+  console.log("race — A:", await status(A)); console.log("race — B:", await status(B));
   await A.click("text=Sync now"); await A.waitForTimeout(2500); await B.click("text=Sync now"); await B.waitForTimeout(2500);
   console.log("after race — A:", await status(A), "|", await counts(A)); console.log("after race — B:", await status(B), "|", await counts(B));
   // Inbox: a pack dropped into inbox/ shows up on A after a sync, is reviewed with one card dropped, added, then removed.
   gh.drop("hyperk.yuzu.json", JSON.stringify({ yuzu_pack: 1, id: "test-pack", name: "Test pack", category: "Medicine::Specialties::Emergency Medicine::Test", cards: [{ id: "a", type: "cloze", text: "K+ > {{c1::5.0}}" }, { id: "b", type: "basic", front: "Q2", back: "A2" }, { id: "c", type: "basic", front: "Q3", back: "A3" }] }));
-  await A.click("text=Sync now"); await A.waitForTimeout(2500); await A.click("nav.tabs >> text=Today"); await A.waitForTimeout(300);
+  await syncOf(A); await A.click("nav.tabs >> text=Today"); await A.waitForTimeout(300);
   console.log("inbox card:", await A.locator("text=1 new pack from Claude").count());
   await A.click("text=Review"); await A.waitForTimeout(300); await A.click("text=Test pack"); await A.waitForTimeout(300);
   await A.click("text=Q3"); await A.waitForTimeout(200); await A.click("text=Add 2 cards"); await A.waitForTimeout(1500);
   const n1 = await A.evaluate(() => (window as any).yuzu.notes.size); console.log("notes after add:", n1, "| inbox left:", await A.evaluate(() => (window as any).yuzu.inbox.length), "| repo inbox files:", Object.keys(gh.files()).filter((k) => k.startsWith("inbox/")).length);
   await A.click("text=Remove"); await A.waitForTimeout(800);
   console.log("notes after remove:", await A.evaluate(() => (window as any).yuzu.notes.size));
-  await B.click("text=Sync now"); await B.waitForTimeout(2500); console.log("B inbox after sync:", await B.evaluate(() => (window as any).yuzu.inbox.length), "B notes:", await B.evaluate(() => (window as any).yuzu.notes.size));
+  await syncOf(B); console.log("B inbox after sync:", await B.evaluate(() => (window as any).yuzu.inbox.length), "B notes:", await B.evaluate(() => (window as any).yuzu.notes.size));
   // Undo survives sync: B reviews one card, syncs, undoes it, syncs; A must end up without that review.
   const revBefore = await A.evaluate(() => (window as any).yuzu.reviews.length);
-  const syncOf = async (p: any) => { await p.evaluate(async () => { const y = (window as any).yuzu; while (y.syncStatus.state === "syncing") await new Promise((r) => setTimeout(r, 100)); await y.sync(); }); };
   await study(B, ["good"]); await syncOf(B); await syncOf(A);
   console.log("A reviews after B's review:", await A.evaluate(() => (window as any).yuzu.reviews.length), "(before", revBefore + ")");
   await B.evaluate(() => (window as any).yuzu.undoLast()); await syncOf(B); await syncOf(A);

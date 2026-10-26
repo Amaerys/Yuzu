@@ -103,13 +103,16 @@ test("large shards are stored gzip-compressed and round-trip; changing one card 
   const cards = Array.from({ length: 40000 }, (_, i) => mkCard(String(i), 1));
   const s1 = await GitHubSync.shard({ notetypes: [], notes: [], cards, reviews: [], settings: { updatedAt: 1 } });
   const r1 = await A.push(s1.hashes, s1.make, null, "A");
-  assert.ok(Object.values(r1.manifest.stored ?? {}).some((p) => p.endsWith(".gz")), "some shards gzipped");
+  assert.equal(Object.keys(r1.manifest.stored ?? {}).length, 0, "bulk first sync stores plain files inline (few large requests)");
+  assert.ok(gh.calls() < 60, `bulk upload should take few requests, took ${gh.calls()}`);
   const got = await B.pullChanged((await B.pullManifest())!, {});
   assert.equal(got.cards!.length, 40000, "all cards come back through gunzip");
   cards[7] = { ...cards[7], mod: 2, reps: 2 };
   const s2 = await GitHubSync.shard({ notetypes: [], notes: [], cards, reviews: [], settings: { updatedAt: 1 } });
   const r2 = await A.push(s2.hashes, s2.make, (await A.pullManifest())!, "A");
   assert.equal(r2.pushed, 1); assert.ok(r2.bytes < 20000, `one review should upload a few KB, got ${r2.bytes}`);
+  assert.ok(Object.values(r2.manifest.stored ?? {}).some((p) => p.endsWith(".gz")), "incremental shard stored gzip-compressed");
+  const got2 = await B.pullChanged((await B.pullManifest())!, r1.manifest.files); assert.equal(got2.cards!.find((c) => c.id === "7")!.reps, 2, "mixed plain + gz files read back");
 });
 
 test("history compaction folds the branch into one parentless commit holding the same files", async () => {
@@ -122,4 +125,19 @@ test("history compaction folds the branch into one parentless commit holding the
   assert.deepEqual(gh.parentsOfHead(), [], "orphan commit"); assert.equal(Object.keys(gh.files()).length, before, "same files");
   const after = (await A.pullManifest())!; assert.equal(after.commits, 0);
   const got = await A.pullChanged(after, {}); assert.equal(got.cards!.length, 5);
+});
+
+test("sync lock: a second device waits instead of colliding; the lock is removed by the push and expires if abandoned", async () => {
+  const gh = fakeGitHub(); const A = client(gh), B = client(gh);
+  assert.equal((await A.acquireLock("A")).held, true);
+  const b = await B.acquireLock("B"); assert.equal(b.held, false); assert.equal(b.by, "A");
+  assert.equal((await A.acquireLock("A")).held, true, "re-entrant for the same device");
+  const sh = await GitHubSync.shard({ notetypes: [], notes: [], cards: [mkCard("1", 1)], reviews: [], settings: {} });
+  await A.pullManifest(); await A.push(sh.hashes, sh.make, null, "A");
+  assert.ok(!("lock.json" in gh.files()), "push removes the lock");
+  assert.equal((await B.acquireLock("B")).held, true);
+  await B.releaseLock(); assert.ok(!("lock.json" in gh.files()));
+  // abandoned lock: expired → taken over
+  const old = GitHubSync.LOCK_MS; GitHubSync.LOCK_MS = -1; await A.acquireLock("A"); GitHubSync.LOCK_MS = old;
+  assert.equal((await B.acquireLock("B")).held, true, "expired lock is taken over");
 });

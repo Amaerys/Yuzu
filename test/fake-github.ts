@@ -18,6 +18,7 @@ export function fakeGitHub(opts: { flaky?: number } = {}) {
       if (!head) return json({ message: "This repository is empty." }, 404);
       const path = decodeURIComponent(p.slice(10));
       const tree = trees.get(commits.get(head)!.tree)!;
+      if (path === "lock.json") { const b = tree[path]; return b ? json({ sha: b, content: blobs.get(b)!.toString("base64") }) : json({ message: "Not Found" }, 404); }
       if (path === "inbox") { const files = Object.keys(tree).filter((k) => k.startsWith("inbox/")); return files.length ? json(files.map((k) => ({ type: "file", name: k.slice(6), sha: tree[k], size: blobs.get(tree[k])!.length }))) : new Response("", { status: 404 }); }
       const b = tree[path]; if (!b) return new Response("", { status: 404 });
       return new Response(new Uint8Array(blobs.get(b)!), { status: 200 });
@@ -26,14 +27,18 @@ export function fakeGitHub(opts: { flaky?: number } = {}) {
       const path = decodeURIComponent(p.slice(10)); const tree = { ...trees.get(commits.get(head!)!.tree)! }; if (!tree[path]) return json({ message: "Not Found" }, 404);
       delete tree[path]; const t = sha(); trees.set(t, tree); const c = sha(); commits.set(c, { tree: t, parents: [head!] }); head = c; return json({ commit: { sha: c } });
     }
-    if (p === "/contents/.yuzu" && m === "PUT") { const b = sha(); blobs.set(b, dec(body.content)); const t = sha(); trees.set(t, { ".yuzu": b }); const c = sha(); commits.set(c, { tree: t, parents: [] }); head = c; return json({ commit: { sha: c } }); }
+    if (p.startsWith("/contents/") && (m === "PUT" || m === "DELETE")) {
+      const path = decodeURIComponent(p.slice(10)); const tree = { ...(head ? trees.get(commits.get(head)!.tree)! : {}) };
+      if (m === "PUT") { const b = sha(); blobs.set(b, dec(body.content)); tree[path] = b; } else delete tree[path];
+      const t = sha(); trees.set(t, tree); const c = sha(); commits.set(c, { tree: t, parents: head ? [head] : [] }); head = c; return json({ commit: { sha: c }, content: { sha: tree[path] } });
+    }
     if (!head && p.startsWith("/git/")) return json({ message: "Git Repository is empty." }, 409);
     if (p === "/git/ref/heads/main") return json({ object: { sha: head } });
     if (p.startsWith("/git/commits/") && m === "GET") return json({ tree: { sha: commits.get(p.slice(13))!.tree } });
     if (p === "/git/blobs" && m === "POST") { const s = sha(); blobs.set(s, dec(body.content)); return json({ sha: s }); }
     if (p === "/git/trees" && m === "POST") {
       const base = body.base_tree ? { ...trees.get(body.base_tree)! } : {};
-      for (const t of body.tree) { if (t.sha === null) delete base[t.path]; else base[t.path] = t.sha; }
+      for (const t of body.tree) { if (t.sha === null) delete base[t.path]; else if (t.content !== undefined) { const b = sha(); blobs.set(b, Buffer.from(t.content)); base[t.path] = b; } else base[t.path] = t.sha; }
       const s = sha(); trees.set(s, base); return json({ sha: s });
     }
     if (p === "/git/commits" && m === "POST") { const s = sha(); commits.set(s, { tree: body.tree, parents: body.parents }); return json({ sha: s }); }

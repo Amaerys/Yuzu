@@ -123,16 +123,19 @@ export class Store {
     const t0 = Date.now();
     this.setSync("syncing", "Syncing…");
     let lastBump = 0;
-    const progress = (m: string) => { this.syncStatus = { ...this.syncStatus, message: m }; const t = Date.now(); if (t - lastBump > 250) { lastBump = t; this.bump(); } };
+    const progress = (m: string) => { if (this.syncStatus.state !== "syncing") return; this.syncStatus = { ...this.syncStatus, message: m }; const t = Date.now(); if (t - lastBump > 250) { lastBump = t; this.bump(); } };
     try {
       let summary = "";
       for (let attempt = 0; attempt < 3; attempt++) {
         const known = await db.getMeta<Record<string, string>>("syncKnown", {});
+        // One device at a time: take the lock first; if another device holds it, come back in a minute instead of colliding.
+        const lock = await gh.acquireLock(this.settings.deviceName || "device");
+        if (!lock.held) { this.scheduleSync(60000); throw new SyncError(`${lock.by} is syncing right now; this device will retry in a minute.`, "busy"); }
         const remote = await gh.pullManifest();
         let pulledN = 0, pulledC = 0, pulledR = 0; let got: Awaited<ReturnType<GitHubSync["pullChanged"]>> | null = null;
         // Fast path: nothing changed here and the repository is exactly what we last saw → two requests and done.
         const lastSeen = await db.getMeta<number>("syncSeenAt", 0);
-        if (!this.dirty && remote && remote.updatedAt === lastSeen && this.shardCache.size) { summary = "Up to date"; break; }
+        if (!this.dirty && remote && remote.updatedAt === lastSeen && this.shardCache.size) { await gh.releaseLock(); summary = "Up to date"; break; }
         if (remote) {
           got = await gh.pullChanged(remote, known, progress);
           progress("Merging");
@@ -182,6 +185,7 @@ export class Store {
         try {
           const counts = { notes: this.notes.size, cards: this.cards.size, reviews: this.reviews.length };
           const res = await gh.push(hashes, make, remote, this.settings.deviceName, progress, counts, mediaBlobs);
+          if (!res.commit) await gh.releaseLock(); // nothing to push: the push did not make a commit, so remove the lock separately
           await db.setMeta("syncKnown", res.manifest.files); await db.setMeta("syncSeenAt", res.manifest.updatedAt); await db.setMeta("mediaIndex", mediaIndex);
           // Shared images missing here: fetch a batch now; the rest on the next sync.
           if (this.settings.mediaDownload) {
@@ -208,8 +212,9 @@ export class Store {
           summary = parts.length ? parts.join(", ") : "Up to date";
           break;
         } catch (e) {
-          // Another device pushed in between: pull again and retry.
+          // Another device pushed in between: pull again and retry (already-uploaded files are reused).
           if (e instanceof SyncError && e.kind === "conflict" && attempt < 2) { progress("Another device synced at the same time — retrying"); continue; }
+          await gh.releaseLock();
           throw e;
         }
       }
@@ -218,8 +223,8 @@ export class Store {
       this.bump();
     } catch (e: any) {
       const msg = e?.message ?? String(e);
-      this.log(false, msg, Date.now() - t0);
-      this.setSync("error", msg);
+      this.log(e instanceof SyncError && e.kind === "busy", msg, Date.now() - t0);
+      this.setSync(e instanceof SyncError && e.kind === "busy" ? "idle" : "error", msg);
     } finally {
       if (this.syncAgain) { this.syncAgain = false; this.scheduleSync(1000); }
     }
@@ -500,7 +505,7 @@ export class Store {
   async dismissInbox(sha: string) {
     const e = this.inbox.find((x) => x.sha === sha); if (!e) return;
     this.inbox = this.inbox.filter((x) => x.sha !== sha); await db.setMeta("inbox", this.inbox); this.bump();
-    if (this.syncConfigured()) { const cfg = this.settings.sync; new GitHubSync({ owner: cfg.owner, repo: cfg.repo, token: cfg.token }).deleteInbox(e.file, e.sha).catch(() => {}); }
+    if (this.syncConfigured()) { const cfg = this.settings.sync; await new GitHubSync({ owner: cfg.owner, repo: cfg.repo, token: cfg.token }).deleteInbox(e.file, e.sha).catch(() => {}); }
   }
   /** Remove every note a pack added (cards and history go with them). */
   async removePack(id: string) {
