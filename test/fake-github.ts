@@ -3,7 +3,7 @@ export function fakeGitHub(opts: { flaky?: number } = {}) {
   const blobs = new Map<string, Buffer>();
   const trees = new Map<string, Record<string, string>>(); // tree sha -> path -> blob sha
   const commits = new Map<string, { tree: string; parents: string[] }>();
-  let head: string | null = null;
+  let head: string | null = null; const refs = new Map<string, string>();
   let n = 0; const sha = () => `sha${++n}`;
   let flaky = opts.flaky ?? 0; let calls = 0;
   const dec = (b64: string) => Buffer.from(b64, "base64");
@@ -34,20 +34,24 @@ export function fakeGitHub(opts: { flaky?: number } = {}) {
     }
     if (!head && p.startsWith("/git/")) return json({ message: "Git Repository is empty." }, 409);
     if (p === "/git/ref/heads/main") return json({ object: { sha: head } });
-    if (p.startsWith("/git/commits/") && m === "GET") return json({ tree: { sha: commits.get(p.slice(13))!.tree } });
+    if (p.startsWith("/git/ref/") && m === "GET") { const r = refs.get(p.slice(9)); return r ? json({ object: { sha: r } }) : json({ message: "Not Found" }, 404); }
+    if (p.startsWith("/git/refs/") && m === "DELETE") { refs.delete(p.slice(10)); return new Response(null, { status: 204 }); }
+    if (p.startsWith("/git/refs/") && p !== "/git/refs/heads/main" && m === "PATCH") { refs.set(p.slice(10), body.sha); return json({}); }
+    if (p.startsWith("/git/commits/") && m === "GET" && !commits.get(p.slice(13))) return json({ message: "Not Found" }, 404);
+    if (p.startsWith("/git/commits/") && m === "GET") { const c = commits.get(p.slice(13))!; return json({ tree: { sha: c.tree }, message: (c as any).message ?? "" }); }
     if (p === "/git/blobs" && m === "POST") { const s = sha(); blobs.set(s, dec(body.content)); return json({ sha: s }); }
     if (p === "/git/trees" && m === "POST") {
       const base = body.base_tree ? { ...trees.get(body.base_tree)! } : {};
       for (const t of body.tree) { if (t.sha === null) delete base[t.path]; else if (t.content !== undefined) { const b = sha(); blobs.set(b, Buffer.from(t.content)); base[t.path] = b; } else base[t.path] = t.sha; }
       const s = sha(); trees.set(s, base); return json({ sha: s });
     }
-    if (p === "/git/commits" && m === "POST") { const s = sha(); commits.set(s, { tree: body.tree, parents: body.parents }); return json({ sha: s }); }
+    if (p === "/git/commits" && m === "POST") { const s = sha(); commits.set(s, { tree: body.tree, parents: body.parents, message: body.message } as any); return json({ sha: s }); }
     if (p === "/git/refs/heads/main" && m === "PATCH") {
       const c = commits.get(body.sha)!;
       if (!body.force && c.parents[0] !== head) return json({ message: "Update is not a fast forward" }, 422);
       head = body.sha; return json({});
     }
-    if (p === "/git/refs" && m === "POST") { head = body.sha; return json({}); }
+    if (p === "/git/refs" && m === "POST") { if (body.ref === "refs/heads/main") { head = body.sha; return json({}); } const k = body.ref.replace(/^refs\//, ""); if (refs.has(k)) return json({ message: "Reference already exists" }, 422); refs.set(k, body.sha); return json({}); }
     return new Response("nope " + m + " " + p, { status: 500 });
   };
   const drop = (name: string, content: string) => { const b = sha(); blobs.set(b, Buffer.from(content)); const tree = { ...(head ? trees.get(commits.get(head)!.tree)! : {}) }; tree["inbox/" + name] = b; const t = sha(); trees.set(t, tree); const c = sha(); commits.set(c, { tree: t, parents: head ? [head] : [] }); head = c; };

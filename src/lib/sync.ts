@@ -111,6 +111,7 @@ export class GitHubSync {
     const res = await this.request(this.base + path, { ...init, headers: this.headers({ ...(init.headers as any), ...(init.body ? { "Content-Type": "application/json" } : {}) }) });
     if (!init.method && (res.status === 404 || res.status === 409)) return null;
     if (!res.ok) throw await this.explain(res, what);
+    if (res.status === 204) return null;
     return res.json();
   }
 
@@ -125,38 +126,53 @@ export class GitHubSync {
     } catch (e: any) { return { ok: false, message: e.message }; }
   }
 
+  /** Reads go by the exact commit once we know it: the Contents API caches by branch name and can serve a stale copy right after a push. */
+  private get readRef() { return this.seenHead || this.branch; }
   private async readFile(path: string, stored?: Record<string, string>): Promise<string | null> {
     const real = stored?.[path] ?? path;
-    const res = await this.request(`${this.base}/contents/${real}?ref=${this.branch}`, { headers: this.headers({ Accept: "application/vnd.github.raw+json" }) });
+    const res = await this.request(`${this.base}/contents/${real}?ref=${this.readRef}`, { headers: this.headers({ Accept: "application/vnd.github.raw+json" }) });
     if (res.status === 404 || res.status === 409) return null;
     if (!res.ok) throw await this.explain(res, `read ${path}`);
     if (real.endsWith(".gz")) return gunzip(new Uint8Array(await res.arrayBuffer()));
     return res.text();
   }
 
-  /** Sync lock: one device uploads at a time. Others wait instead of colliding and redoing the work. Expires on its own. */
+  /** Sync lock: one device uploads at a time. Implemented as a git ref (refs/yuzu/lock) pointing at a tiny commit
+   *  whose message holds {device, until}: creating a ref is atomic and the Git Data API is never served from a stale cache. */
   static LOCK_MS = 12 * 60000;
-  async acquireLock(device: string): Promise<{ held: boolean; by?: string }> {
-    const cur = await this.api(`/contents/lock.json?ref=${this.branch}`);
-    if (cur?.content) {
-      try { const l = JSON.parse(atob(cur.content.replace(/\n/g, ""))); if (l.until > Date.now() && l.device !== device) return { held: false, by: l.device || "another device" }; } catch { /* broken lock: take over */ }
-    }
-    const body = { message: `Yuzu: ${device || "device"} syncing`, content: utf8ToBase64(JSON.stringify({ device, until: Date.now() + GitHubSync.LOCK_MS })), branch: this.branch, ...(cur?.sha ? { sha: cur.sha } : {}) };
-    const r = await this.api(`/contents/lock.json`, { method: "PUT", body: JSON.stringify(body) }, "take the sync lock");
-    this.lockSha = r?.content?.sha ?? null;
-    return { held: true };
-  }
-  private lockSha: string | null = null;
+  private holdsLock = false;
   private blobCache = new Map<string, string>();
-  /** Remove the lock outside the normal push (error path). The push itself deletes lock.json in its commit. */
+  async acquireLock(device: string): Promise<{ held: boolean; by?: string }> {
+    const cur = await this.api(`/git/ref/yuzu/lock`);
+    if (!cur && !(await this.api(`/git/ref/heads/${this.branch}`))) return { held: true }; // empty repository: nothing to contend for yet
+    if (cur?.object?.sha) {
+      let info: { device?: string; until?: number } = {};
+      try { const c = await this.api(`/git/commits/${cur.object.sha}`); info = JSON.parse(c?.message ?? "{}"); } catch { /* unreadable: treat as expired */ }
+      if ((info.until ?? 0) > Date.now() && info.device !== device) return { held: false, by: info.device || "another device" };
+      // ours already, or expired: point the ref at a fresh lock commit
+      const sha = await this.lockCommit(device);
+      await this.api(`/git/refs/yuzu/lock`, { method: "PATCH", body: JSON.stringify({ sha, force: true }) }, "refresh the sync lock");
+      this.holdsLock = true; return { held: true };
+    }
+    const sha = await this.lockCommit(device);
+    try { await this.api("/git/refs", { method: "POST", body: JSON.stringify({ ref: "refs/yuzu/lock", sha }) }, "take the sync lock"); }
+    catch (e) { if (e instanceof SyncError && e.kind === "conflict") return { held: false, by: "another device" }; throw e; } // created by someone else a moment ago
+    this.holdsLock = true; return { held: true };
+  }
+  private async lockCommit(device: string): Promise<string> {
+    const tree = await this.api("/git/trees", { method: "POST", body: JSON.stringify({ tree: [{ path: "lock", mode: "100644", type: "blob", content: device }] }) }, "take the sync lock");
+    const c = await this.api("/git/commits", { method: "POST", body: JSON.stringify({ message: JSON.stringify({ device, until: Date.now() + GitHubSync.LOCK_MS }), tree: tree.sha, parents: [] }) }, "take the sync lock");
+    return c.sha as string;
+  }
   async releaseLock(): Promise<void> {
-    try { const cur = await this.api(`/contents/lock.json?ref=${this.branch}`); if (cur?.sha) await this.api(`/contents/lock.json`, { method: "DELETE", body: JSON.stringify({ message: "Yuzu: sync lock released", sha: cur.sha, branch: this.branch }) }, "release the sync lock"); } catch { /* expires anyway */ }
-    this.lockSha = null;
+    if (!this.holdsLock) return;
+    this.holdsLock = false;
+    try { await this.api(`/git/refs/yuzu/lock`, { method: "DELETE" }, "release the sync lock"); } catch { /* expires anyway */ }
   }
 
   /** Files waiting in inbox/ (packs dropped there by Claude or by hand). */
   async listInbox(): Promise<{ name: string; sha: string; size: number }[]> {
-    const list = await this.api(`/contents/inbox?ref=${this.branch}`);
+    const list = await this.api(`/contents/inbox?ref=${this.readRef}`);
     return Array.isArray(list) ? list.filter((f: any) => f.type === "file" && /\.json$/i.test(f.name)).map((f: any) => ({ name: f.name, sha: f.sha, size: f.size })) : [];
   }
   async readInbox(name: string): Promise<string | null> { return this.readFile(`inbox/${encodeURIComponent(name)}`); }
@@ -169,7 +185,7 @@ export class GitHubSync {
 
   /** Download a binary file stored in the repository (shared images). */
   async readBinary(path: string): Promise<Uint8Array | null> {
-    const res = await this.request(`${this.base}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${this.branch}`, { headers: this.headers({ Accept: "application/vnd.github.raw+json" }) });
+    const res = await this.request(`${this.base}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${this.readRef}`, { headers: this.headers({ Accept: "application/vnd.github.raw+json" }) });
     if (res.status === 404) return null;
     if (!res.ok) throw await this.explain(res, `download ${path}`);
     return new Uint8Array(await res.arrayBuffer());
@@ -320,7 +336,6 @@ export class GitHubSync {
     }
     const bq = [...blobs]; let bn = 0;
     await Promise.all(Array.from({ length: 4 }, async () => { while (bq.length) { const b = bq.shift()!; const r = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content: bytesToBase64(b.bytes), encoding: "base64" }) }, `upload ${b.path}`); tree.push({ path: b.path, mode: "100644", type: "blob", sha: r.sha }); bytes += b.bytes.length; progress?.(`Uploading images ${++bn} of ${blobs.length}`); } }));
-    if (this.lockSha) tree.push({ path: "lock.json", mode: "100644", type: "blob", sha: null });
     for (const p of toDelete) tree.push({ path: p, mode: "100644", type: "blob", sha: null });
     manifest.stored = stored;
     const mblob = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content: utf8ToBase64(JSON.stringify(manifest)), encoding: "base64" }) }, "upload the manifest");
@@ -330,7 +345,8 @@ export class GitHubSync {
     const commit = await this.api("/git/commits", { method: "POST", body: JSON.stringify({ message: `Yuzu sync from ${device || "device"} (${toWrite.length} files)`, tree: newTree.sha, parents: baseCommit ? [baseCommit] : [] }) }, "create the commit");
     if (baseCommit) await this.api(`/git/refs/heads/${this.branch}`, { method: "PATCH", body: JSON.stringify({ sha: commit.sha, force: false }) }, "advance the branch");
     else await this.api("/git/refs", { method: "POST", body: JSON.stringify({ ref: `refs/heads/${this.branch}`, sha: commit.sha }) }, "create the branch");
-    this.seenHead = commit.sha; this.lockSha = null;
+    this.seenHead = commit.sha;
+    await this.releaseLock();
     return { manifest, commit: commit.sha, pushed: toWrite.length + blobs.length, bytes };
   }
 

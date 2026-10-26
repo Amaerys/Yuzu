@@ -127,16 +127,17 @@ test("history compaction folds the branch into one parentless commit holding the
   const got = await A.pullChanged(after, {}); assert.equal(got.cards!.length, 5);
 });
 
-test("sync lock: a second device waits instead of colliding; the lock is removed by the push and expires if abandoned", async () => {
+test("sync lock: a second device waits instead of colliding; the push releases it; an abandoned lock expires", async () => {
   const gh = fakeGitHub(); const A = client(gh), B = client(gh);
+  const sh = await GitHubSync.shard({ notetypes: [], notes: [], cards: [mkCard("1", 1)], reviews: [], settings: {} });
+  await A.pullManifest(); await A.push(sh.hashes, sh.make, null, "A"); // first commit exists now
   assert.equal((await A.acquireLock("A")).held, true);
   const b = await B.acquireLock("B"); assert.equal(b.held, false); assert.equal(b.by, "A");
   assert.equal((await A.acquireLock("A")).held, true, "re-entrant for the same device");
-  const sh = await GitHubSync.shard({ notetypes: [], notes: [], cards: [mkCard("1", 1)], reviews: [], settings: {} });
-  await A.pullManifest(); await A.push(sh.hashes, sh.make, null, "A");
-  assert.ok(!("lock.json" in gh.files()), "push removes the lock");
-  assert.equal((await B.acquireLock("B")).held, true);
-  await B.releaseLock(); assert.ok(!("lock.json" in gh.files()));
+  const sh2 = await GitHubSync.shard({ notetypes: [], notes: [], cards: [mkCard("1", 1), mkCard("2", 2)], reviews: [], settings: {} });
+  await A.pullManifest(); await A.push(sh2.hashes, sh2.make, await A.pullManifest(), "A");
+  assert.equal((await B.acquireLock("B")).held, true, "push released the lock");
+  await B.releaseLock(); assert.equal((await A.acquireLock("A")).held, true); await A.releaseLock();
   // abandoned lock: expired → taken over
   const old = GitHubSync.LOCK_MS; GitHubSync.LOCK_MS = -1; await A.acquireLock("A"); GitHubSync.LOCK_MS = old;
   assert.equal((await B.acquireLock("B")).held, true, "expired lock is taken over");
