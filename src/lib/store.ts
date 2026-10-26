@@ -135,7 +135,7 @@ export class Store {
         let pulledN = 0, pulledC = 0, pulledR = 0; let got: Awaited<ReturnType<GitHubSync["pullChanged"]>> | null = null;
         // Fast path: nothing changed here and the repository is exactly what we last saw → two requests and done.
         const lastSeen = await db.getMeta<number>("syncSeenAt", 0);
-        if (!this.dirty && remote && remote.updatedAt === lastSeen && this.shardCache.size) { await gh.releaseLock(); summary = "Up to date"; break; }
+        if (!this.dirty && remote && remote.updatedAt === lastSeen && this.shardCache.size) { await this.checkInbox(gh); await gh.releaseLock(); summary = "Up to date"; break; }
         if (remote) {
           got = await gh.pullChanged(remote, known, progress);
           progress("Merging");
