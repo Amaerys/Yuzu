@@ -162,9 +162,11 @@ export class GitHubSync {
       try { const c = await this.api(`/git/commits/${cur.object.sha}`); info = JSON.parse(c?.message ?? "{}"); } catch { /* unreadable: treat as expired */ }
       if ((info.until ?? 0) > Date.now() && info.device !== device) return { held: false, by: info.device || "another device" };
       // ours already, or expired: point the ref at a fresh lock commit
+      // GitHub can refuse to move a ref outside heads/tags ("Reference does not exist"), and the other device may
+      // have just released it — so on any failure clear the stale lock and take it fresh below.
       const sha = await this.lockCommit(device);
-      await this.api(`/git/refs/yuzu/lock`, { method: "PATCH", body: JSON.stringify({ sha, force: true }) }, "refresh the sync lock");
-      this.holdsLock = true; return { held: true };
+      try { await this.api(`/git/refs/yuzu/lock`, { method: "PATCH", body: JSON.stringify({ sha, force: true }) }, "refresh the sync lock"); this.holdsLock = true; return { held: true, }; }
+      catch { try { await this.api(`/git/refs/yuzu/lock`, { method: "DELETE" }, "clear an old sync lock"); } catch { /* already gone */ } }
     }
     const sha = await this.lockCommit(device);
     try { await this.api("/git/refs", { method: "POST", body: JSON.stringify({ ref: "refs/yuzu/lock", sha }) }, "take the sync lock"); }
