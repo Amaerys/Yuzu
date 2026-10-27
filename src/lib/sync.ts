@@ -9,6 +9,7 @@
 // - A push that loses a race with another device (non-fast-forward) is retried after re-pulling.
 // - Only shards whose fingerprint changed are re-serialized and hashed; unchanged shards reuse cached hashes.
 import type { Card, Note, Notetype, Review } from "./model";
+import { fmtDateTime } from "./dates";
 
 export interface SyncConfig { owner: string; repo: string; token: string; branch?: string }
 export interface Manifest {
@@ -69,7 +70,7 @@ function utf8ToBase64(s: string): string {
 }
 
 export class SyncError extends Error {
-  constructor(message: string, public kind: "auth" | "notfound" | "conflict" | "network" | "ratelimit" | "busy" | "other" = "other") { super(message); }
+  constructor(message: string, public kind: "auth" | "notfound" | "conflict" | "network" | "ratelimit" | "busy" | "other" = "other", public resumeAt?: number) { super(message); }
 }
 
 /** Cache of shard fingerprints: path → { fp (fingerprint of the records), hash of the JSON }. The JSON itself is not kept. */
@@ -92,8 +93,17 @@ export class GitHubSync {
       try {
         const res = await this.fetchImpl(url, init);
         if (res.status >= 500) { lastErr = new SyncError(`GitHub is having trouble (${res.status}); will retry`, "network"); continue; }
+        // Rate limit: short waits are slept through, long ones are reported with the time sync resumes.
+        if ((res.status === 403 || res.status === 429) && (res.headers.get("x-ratelimit-remaining") === "0" || res.headers.get("retry-after"))) {
+          const retry = Number(res.headers.get("retry-after") ?? 0) * 1000; const reset = Number(res.headers.get("x-ratelimit-reset") ?? 0) * 1000;
+          const resumeAt = retry ? Date.now() + retry : reset || Date.now() + 60000;
+          const wait = resumeAt - Date.now();
+          if (wait <= 20000 && attempt < 2) { await new Promise((r) => setTimeout(r, Math.max(1000, wait))); continue; }
+          const d = new Date(resumeAt); const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+          throw new SyncError(`GitHub's hourly request limit is used up; sync resumes by itself at ${hhmm}.`, "ratelimit", resumeAt);
+        }
         return res;
-      } catch (e: any) { lastErr = new SyncError(`Network error: ${e?.message ?? e}`, "network"); }
+      } catch (e: any) { if (e instanceof SyncError) throw e; lastErr = new SyncError(`Network error: ${e?.message ?? e}`, "network"); }
     }
     throw lastErr;
   }
@@ -123,7 +133,7 @@ export class GitHubSync {
       if (!repo) return { ok: false, message: `Repository ${this.cfg.owner}/${this.cfg.repo} not found. Check the name and that the token can access it.` };
       if (!repo.permissions?.push) return { ok: false, message: "Token has no write access to this repository (needs Contents: read and write)." };
       const m = await this.pullManifest();
-      const state = m ? `holds a Yuzu sync from ${m.device || "another device"} (${new Date(m.updatedAt).toLocaleString()})` : "is empty — the first sync will fill it";
+      const state = m ? `holds a Yuzu sync from ${m.device || "another device"} (${fmtDateTime(m.updatedAt)})` : "is empty — the first sync will fill it";
       return { ok: true, message: `Connected to ${repo.full_name}${repo.private ? "" : " (PUBLIC — your cards are visible to anyone)"}; it ${state}.` };
     } catch (e: any) { return { ok: false, message: e.message }; }
   }

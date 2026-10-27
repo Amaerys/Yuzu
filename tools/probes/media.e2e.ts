@@ -9,8 +9,8 @@ try {
   await page.waitForFunction(() => /Imported/.test(document.body.innerText), null, { timeout: 120000 });
   console.log("before:", await page.evaluate(() => document.body.innerText.match(/[\d,]+ of [\d,]+ images[^.]*\./)?.[0]));
   await page.locator('input[type=file][accept*=apkg]').nth(1).setInputFiles("test/fixtures/legacy-with-media.apkg");
-  await page.waitForFunction(() => /images added/.test(document.body.innerText), null, { timeout: 120000 });
-  console.log("result:", await page.evaluate(() => document.body.innerText.match(/[\d,]+ images added[^.]*\./)?.[0]));
+  await page.waitForFunction(() => /^Added .*images/m.test(document.body.innerText), null, { timeout: 120000 });
+  console.log("result:", await page.evaluate(() => document.body.innerText.match(/^Added[^\n]*/m)?.[0]));
   console.log("after:", await page.evaluate(() => document.body.innerText.match(/[\d,]+ of [\d,]+ images[^.]*\./)?.[0]));
   // find a card using the big image and preview it
   await page.click("nav.tabs >> text=Library"); await page.waitForTimeout(300);

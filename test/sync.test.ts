@@ -142,3 +142,18 @@ test("sync lock: a second device waits instead of colliding; the push releases i
   const old = GitHubSync.LOCK_MS; GitHubSync.LOCK_MS = -1; await A.acquireLock("A"); GitHubSync.LOCK_MS = old;
   assert.equal((await B.acquireLock("B")).held, true, "expired lock is taken over");
 });
+
+test("rate limit: a long wait is reported with the resume time instead of an error loop", async () => {
+  const c = new GitHubSync(cfg); const reset = Math.floor(Date.now() / 1000) + 1800;
+  c.fetchImpl = (async () => new Response(JSON.stringify({ message: "API rate limit exceeded" }), { status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) } })) as any;
+  await assert.rejects(c.pullManifest(), (e: any) => e instanceof SyncError && e.kind === "ratelimit" && Math.abs(e.resumeAt - reset * 1000) < 1000 && /resumes by itself/.test(e.message));
+});
+
+test("clock: edits are stamped after anything observed from another device, even with a slow local clock", async () => {
+  const { stamp, observe } = await import("../src/lib/clock.ts");
+  const ahead = Date.now() + 10 * 60000; // the other phone's clock is 10 minutes ahead
+  observe(ahead);
+  const t = stamp(); assert.ok(t > ahead, "a later edit here beats the other device's earlier one");
+  assert.ok(stamp() > t, "strictly increasing");
+  observe(Date.now() + 3 * 86400000); assert.ok(stamp() < Date.now() + 86400000, "implausible future times are ignored");
+});

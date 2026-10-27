@@ -26,9 +26,10 @@ export interface ImportResult {
 const SEP31 = "\x1f";
 const mediaRe = /<img[^>]+src=["']([^"']+)["']|\[sound:([^\]]+)\]/gi;
 
-export async function openAnkiPackage(bytes: Uint8Array, env: ImportEnv): Promise<{ db: SqliteReader; format: ImportSummary["format"] }> {
+export async function openAnkiPackage(input: Uint8Array | Blob, env: ImportEnv): Promise<{ db: SqliteReader; format: ImportSummary["format"] }> {
   env.onProgress?.("Reading package");
-  const zip = new ZipFile(new Blob([bytes as BlobPart]), env.inflateRaw);
+  // A Blob/File is read in slices: an export with gigabytes of media never has to fit in memory.
+  const zip = new ZipFile(input instanceof Blob ? input : new Blob([input as BlobPart]), env.inflateRaw);
   const byName = new Map((await zip.list()).map((e) => [e.name, e]));
   const modern = byName.get("collection.anki21b");
   if (modern) {
@@ -104,7 +105,7 @@ export function normalizeTag(t: string): string {
   const seen = tagCase.get(k); if (seen) return seen; tagCase.set(k, x); return x;
 }
 
-export async function importAnki(bytes: Uint8Array, env: ImportEnv, opts: { skipDeckPrefixes?: string[] } = {}): Promise<ImportResult> {
+export async function importAnki(bytes: Uint8Array | Blob, env: ImportEnv, opts: { skipDeckPrefixes?: string[] } = {}): Promise<ImportResult> {
   const { db, format } = await openAnkiPackage(bytes, env);
   env.onProgress?.("Reading note types");
   const notetypes = readNotetypes(db);

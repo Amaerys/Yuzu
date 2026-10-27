@@ -55,7 +55,9 @@ try {
   console.log("after bulk suspend:", await page.locator(".card-box .small.muted").first().innerText());
   await page.click("button.chip >> text=Select"); await page.waitForTimeout(200);
   await page.getByRole("button", { name: /^All \d/ }).first().click(); await page.click(".bulk-bar >> text=Unsuspend"); await page.waitForTimeout(400);
-  await page.locator(".list-row").first().click(); await page.waitForSelector("text=Preview"); await page.screenshot({ path: `${shots}/04d-preview.png` });
+  await page.waitForSelector(".card-box >> text=/ 0 suspended/"); await page.waitForSelector(".bulk-bar", { state: "detached" });
+  for (let i = 0; i < 3 && !(await page.locator("text=Preview").count()); i++) { await page.locator(".list-row").first().click(); await page.waitForTimeout(400); }
+  await page.waitForSelector("text=Preview"); await page.screenshot({ path: `${shots}/04d-preview.png` });
   await page.click('[aria-label="Close preview"]');
   // Card pack import with an image, then study it
   await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; }));
@@ -65,7 +67,7 @@ try {
   await page.click("nav.tabs >> text=Library"); await page.click(".seg >> text=Decks");
   await page.fill("input[placeholder^=Search]", "peaked (tented) t waves, best seen"); await page.waitForTimeout(300);
   await page.locator(".list-row").first().click(); await page.waitForSelector("text=Preview");
-  const imgOk = await page.locator(".sheet .paper").evaluate((el) => { const img = el.shadowRoot!.querySelector("img") as HTMLImageElement | null; return img ? img.src.startsWith("blob:") : false; });
+  const imgOk = await page.locator(".sheet .paper .card-host").evaluate((el) => { const img = el.shadowRoot!.querySelector("img") as HTMLImageElement | null; return img ? img.src.startsWith("blob:") : false; });
   console.log("pack image renders:", imgOk);
   await page.screenshot({ path: `${shots}/09-pack-preview.png` });
   await page.click('[aria-label="Close preview"]');

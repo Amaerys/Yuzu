@@ -2,7 +2,9 @@ import { createRoot } from "react-dom/client";
 import { App } from "./ui/App";
 import { store } from "./lib/store";
 
-store.load().catch(() => { /* shown by the recovery screen */ });
+import { applyTheme } from "./ui/sfx";
+store.load().then(() => applyTheme(store.settings.theme)).catch(() => { /* shown by the recovery screen */ });
+store.subscribe(() => { if (store.loaded && document.documentElement.dataset.theme !== store.settings.theme) applyTheme(store.settings.theme); });
 createRoot(document.getElementById("root")!).render(<App />);
 (window as any).yuzu = store; // for debugging from the console
 

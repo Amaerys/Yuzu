@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { store, VIEWS, type TreeNode, type View, type SmartDeck } from "../lib/store";
 import { noteTitle, renderCard } from "../lib/render";
+import { CardView } from "./Study";
 import { SYSTEM_NAMES } from "../lib/classify";
 import type { Card, CardState } from "../lib/model";
 import { IconChevron, IconPlay, IconClose, IconPin, IconEdit } from "./icons";
@@ -22,12 +23,10 @@ function Preview({ card, onClose }: { card: Card; onClose: () => void }) {
   useBack(true, onClose);
   const note = store.noteFor(card)!; const nt = store.notetypeFor(note)!;
   const r = renderCard({ note, notetype: nt, ord: card.ord, deck: card.source, resolveMedia: store.mediaUrl });
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => { const h = ref.current!; const root = h.shadowRoot ?? h.attachShadow({ mode: "open" }); root.innerHTML = `<style>.card{font-size:17px;line-height:1.4;color:#efe7d6} img{max-width:100%} .cloze{color:#ff7a1a;font-weight:700} hr#answer{border:0;border-top:2px dashed rgba(255,255,255,.18);margin:10px 0}</style><style>${r.css}</style><div class="night_mode nightMode"><div class="card night_mode">${r.back}</div></div>`; }, [card.id]);
   return (
     <div className="sheet-backdrop" onClick={onClose}><div className="sheet" onClick={(e) => e.stopPropagation()}>
       <div className="row" style={{ marginBottom: 8 }}><b className="grow">Preview</b><span className="chip">{card.suspended ? "suspended" : card.state}</span><button className="icon-btn" aria-label="Close preview" onClick={onClose}><IconClose /></button></div>
-      <div ref={ref} className="paper slate" style={{ "--tilt": "0deg", "--spine": systemColor(note.tags.find((t) => t.startsWith("auto::System::"))?.slice(14)) } as any} />
+      <div className="paper slate" style={{ "--tilt": "0deg", "--spine": systemColor(note.tags.find((t) => t.startsWith("auto::System::"))?.slice(14)) } as any}><CardView html={r.back} css={r.css} dark side="back" /></div>
       <p className="small muted">{card.source}{note.tags.length ? " · " + note.tags.filter((t) => !t.startsWith("auto::")).join(", ") : ""}</p>
       <div className="row"><button className="btn grow" onClick={async () => { await store.setSuspended(card.id, !card.suspended); onClose(); }}>{card.suspended ? "Unsuspend" : "Suspend"}</button><button className="btn grow" onClick={async () => { await store.setFlag(card.id, card.flag ? 0 : 1); onClose(); }}>{card.flag ? "Unflag" : "Flag"}</button></div>
     </div></div>

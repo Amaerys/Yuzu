@@ -49,7 +49,8 @@ let html = fs.readFileSync(path.join(root, "src/index.html"), "utf8")
 fs.writeFileSync(path.join(dist, "index.html"), html);
 
 const version = `${pkg.version}-${hash(Buffer.concat([js, css]))}`;
-const precache = ["./", "./index.html", "./manifest.webmanifest", `./assets/${jsName}`, `./assets/${cssName}`, ...icons];
+const fonts = fs.existsSync(path.join(dist, "fonts")) ? fs.readdirSync(path.join(dist, "fonts")).map((f) => `./fonts/${f}`) : [];
+const precache = ["./", "./index.html", "./manifest.webmanifest", `./assets/${jsName}`, `./assets/${cssName}`, ...icons, ...fonts];
 let sw = fs.readFileSync(path.join(root, "src/sw.js"), "utf8")
   .replace("__VERSION__", version).replace("__PRECACHE__", JSON.stringify(precache));
 fs.writeFileSync(path.join(dist, "sw.js"), sw);

@@ -84,8 +84,15 @@ export function rewriteMedia(html: string, resolve?: (name: string) => string | 
     return `<img${attrs} data-missing="${escapeHtml(src)}" alt="" class="missing-media" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='60'%3E%3Crect width='120' height='60' rx='8' fill='%23222'/%3E%3Ctext x='60' y='35' font-size='11' fill='%23888' text-anchor='middle' font-family='sans-serif'%3Eimage not loaded%3C/text%3E%3C/svg%3E"`;
   });
   out = out.replace(/\[sound:([^\]]+)\]/g, (_, name) => {
-    const url = resolve?.(name);
-    return url ? `<audio controls preload="none" src="${url}"></audio>` : ""; // audio is not imported; show nothing rather than a broken control
+    const url = resolve?.(name.trim());
+    return url ? `<button type="button" class="yz-sound" data-src="${url}" aria-label="Play sound"><svg viewBox="0 0 12 12" width="18" height="18" shape-rendering="crispEdges" fill="currentColor"><path d="M2 1h2v1h2v1h2v1h2v1h1v2h-1v1h-2v1h-2v1h-2v1h-2z"/></svg></button>`
+      : `<span class="yz-sound missing" title="${escapeHtml(name)}">♪</span>`;
+  });
+  // <audio src="x.mp3"> written into fields or templates.
+  out = out.replace(/<(audio|source|video)([^>]*?)\ssrc=["']([^"']+)["']/gi, (whole, tag, attrs, src) => {
+    if (/^(https?:|data:|blob:)/i.test(src)) return whole;
+    const url = resolve?.(decodeURIComponent(src)) ?? resolve?.(src);
+    return url ? `<${tag}${attrs} src="${url}"` : whole;
   });
   out = out.replace(/<script[\s\S]*?<\/script>/gi, "");
   // Deck HTML runs in the app's origin: drop inline event handlers and javascript: URLs (their functions are gone with the scripts anyway).
@@ -93,11 +100,21 @@ export function rewriteMedia(html: string, resolve?: (name: string) => string | 
   return out;
 }
 
+/** url(_font.woff) and friends in a note type's CSS, pointed at the stored copies. */
+export function rewriteCssUrls(css: string, resolve?: (name: string) => string | null): string {
+  if (!resolve || !css.includes("url(")) return css;
+  return css.replace(/url\(\s*["']?([^"')]+)["']?\s*\)/gi, (whole, src) => {
+    if (/^(https?:|data:|blob:|#)/i.test(src)) return whole;
+    let n = src; try { n = decodeURIComponent(src); } catch { /* keep */ }
+    const url = resolve(n); return url ? `url("${url}")` : whole;
+  });
+}
+
 export function renderCard(ctx: RenderCtx): { front: string; back: string; css: string } {
   const tmpl = ctx.notetype.templates[Math.min(ctx.ord, ctx.notetype.templates.length - 1)] ?? ctx.notetype.templates[0];
   const front = renderTemplate(tmpl?.qfmt ?? "{{Front}}", ctx, "q");
   const back = renderTemplate(tmpl?.afmt ?? "{{FrontSide}}<hr id=answer>{{Back}}", ctx, "a", front);
-  return { front: rewriteMedia(front, ctx.resolveMedia), back: rewriteMedia(back, ctx.resolveMedia), css: ctx.notetype.css };
+  return { front: rewriteMedia(front, ctx.resolveMedia), back: rewriteMedia(back, ctx.resolveMedia), css: rewriteCssUrls(ctx.notetype.css, ctx.resolveMedia) };
 }
 
 /** Plain-text preview of a note (first non-empty field), for lists and duplicate detection. */

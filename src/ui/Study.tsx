@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store, type View } from "../lib/store";
 import type { Card, Rating } from "../lib/model";
 import { renderCard, noteTitle } from "../lib/render";
@@ -6,6 +7,8 @@ import { previewIntervals, humanInterval, retrievability, DAY } from "../schedul
 import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore, IconEdit } from "./icons";
 import { systemColor, stamp, tilt } from "./theme";
 import { useBack } from "./useBack";
+import { sfx } from "./sfx";
+import { wireSounds, playSounds, stopSounds, cardSounds } from "./sound";
 
 const BASE_CSS = `
 :host { display:block; }
@@ -18,11 +21,16 @@ hr#answer { border: 0; border-top: 2px dashed rgba(0,0,0,.18); margin: 16px -4px
 .hint { color: #888; font-style: italic; }
 .missing-media { opacity: .9; }
 .missing-audio { color: #999; }
+.yz-sound { display:inline-flex; align-items:center; justify-content:center; width:40px; height:36px; margin:2px 4px; vertical-align:middle; border:2px solid currentColor; background:transparent; color:#ff7a1a; cursor:pointer; box-shadow:2px 2px 0 rgba(0,0,0,.35); clip-path:polygon(0 4px,4px 4px,4px 0,calc(100% - 4px) 0,calc(100% - 4px) 4px,100% 4px,100% calc(100% - 4px),calc(100% - 4px) calc(100% - 4px),calc(100% - 4px) 100%,4px 100%,4px calc(100% - 4px),0 calc(100% - 4px)); }
+.yz-sound:active { transform: translate(2px,2px); box-shadow:none; }
+.yz-sound.playing { background:#ff7a1a; color:#15120d; animation: yzblink .5s steps(2) infinite; }
+.yz-sound.missing { width:auto; height:auto; padding:0 4px; border-style:dashed; color:#999; box-shadow:none; cursor:default; }
+@keyframes yzblink { 50% { opacity:.6 } }
 .typeans { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 8px; font-size: 18px; }
 .night_mode .card, .card.night_mode { color: #f2f2f0; background: transparent; }
 `;
 
-export function CardView({ html, css, dark }: { html: string; css: string; dark: boolean }) {
+export function CardView({ html, css, dark, side = "front", autoplay = false }: { html: string; css: string; dark: boolean; side?: "front" | "back"; autoplay?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const host = ref.current!;
@@ -30,7 +38,10 @@ export function CardView({ html, css, dark }: { html: string; css: string; dark:
     const cls = dark ? "night_mode nightMode" : "";
     root.innerHTML = `<style>${BASE_CSS}</style><style>${css}</style><div class="${cls}"><div class="card ${cls}">${html}</div></div>`;
     host.scrollTop = 0;
+    const own = wireSounds(root, side);
+    if (autoplay && own.length) playSounds(own); else stopSounds();
   }, [html, css, dark]);
+  useEffect(() => () => stopSounds(), []);
   return <div ref={ref} className={"card-host" + (dark ? " dark" : "")} />;
 }
 
@@ -58,7 +69,7 @@ function hintFor(note: { fields: string[] } | undefined, ord: number): string | 
 }
 
 /** The paper index card: system-colored spine, rubber-stamp state, a tiny per-card tilt, and the next card peeking out below. */
-export function Paper({ card, html, css, dark, children }: { card: Card; html: string; css: string; dark: boolean; children?: React.ReactNode }) {
+export function Paper({ card, html, css, dark, side, children }: { card: Card; html: string; css: string; dark: boolean; side?: "front" | "back"; children?: React.ReactNode }) {
   const note = store.noteFor(card);
   const system = note?.tags.find((t) => t.startsWith("auto::System::"))?.slice(14);
   return (
@@ -66,7 +77,7 @@ export function Paper({ card, html, css, dark, children }: { card: Card; html: s
       <div className="paper-under" />
       <div className={"paper" + (dark ? " slate" : "")}>
         <span className="stamp">{stamp(card)}</span>
-        <CardView html={html} css={css} dark={dark} />
+        <CardView html={html} css={css} dark={dark} side={side} autoplay={store.settings.autoplay} />
         {children}
       </div>
     </div>
@@ -105,10 +116,10 @@ function CardInfo({ card, onClose, onSaved, onTag }: { card: Card; onClose: () =
               <div className="stat"><b>{card.reps}</b><span>reviews</span></div>
               <div className="stat"><b>{card.lapses}</b><span>lapses</span></div>
             </div>
-            <p className="small muted">Due {card.state === "new" ? "never studied" : new Date(card.due).toLocaleString()}<br />Source: {card.source}<br />Type: {nt.name}</p>
+            <p className="small muted">Due {card.state === "new" ? "never studied" : fmtDateTime(card.due)}<br />Source: {card.source}<br />Type: {nt.name}</p>
             {note.tags.length > 0 && <div className="row" style={{ flexWrap: "wrap", gap: 6, marginBottom: 8 }}>{note.tags.filter((t) => !t.startsWith("manual::")).map((t) => <button key={t} className={"chip" + (t.startsWith("auto::") ? " orange" : "")} onClick={() => onTag?.(t)} title="Browse this tag">{t.replace(/^auto::(System|Specialty|Exam|Level)::/, "$1: ")}</button>)}</div>}
             {history.length > 0 && (<><h2 style={{ marginTop: 6 }}>History</h2>
-              {history.map((h) => <div key={h.id} className="list-row"><span className="t">{new Date(h.ts).toLocaleDateString()} <span className="muted">{new Date(h.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></span><span className={"chip " + (h.rating === 1 ? "" : "orange")}>{labels[h.rating]}</span><span className="small muted">{h.scheduledDays ? h.scheduledDays + "d" : ""}</span></div>)}
+              {history.map((h) => <div key={h.id} className="list-row"><span className="t">{fmtDate(h.ts)} <span className="muted">{fmtTime(h.ts)}</span></span><span className={"chip " + (h.rating === 1 ? "" : "orange")}>{labels[h.rating]}</span><span className="small muted">{h.scheduledDays ? h.scheduledDays + "d" : ""}</span></div>)}
             </>)}
             <button className="btn block" style={{ marginTop: 12 }} onClick={() => setEditing(true)}>Edit this card</button>
           </>
@@ -176,6 +187,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
       if (showAnswer && ["1", "2", "3", "4"].includes(e.key)) answer(Number(e.key) as Rating);
       if (e.key === "i") setInfo(true);
       if (e.key === "h" && !showAnswer) setHint(true);
+      if (e.key === "r") playSounds(cardSounds(document.querySelector(".study .card-host")?.shadowRoot));
       if (e.key === "z" && (e.ctrlKey || e.metaKey)) undo();
       if (e.key === "Escape") onExit();
     };
@@ -205,7 +217,10 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
     if (!card || busy.current) return;
     busy.current = true;
     const ms = Date.now() - shownAt.current;
+    const before = store.stats().today;
+    sfx.answer(g);
     try { await store.answer(card.id, g, ms); } finally { busy.current = false; }
+    if (before < store.settings.dailyGoal && before + 1 >= store.settings.dailyGoal) { setTimeout(() => sfx.goal(), 180); flash("Daily goal reached ★"); }
     setResults((r) => [...r, { id: card.id, g, ms }]);
     setDoneCount((d) => d + 1);
     if (store.lastAnswer?.leech && store.lastAnswer.cardId === card.id) setLeech({ cardId: card.id, lapses: store.lastAnswer.lapses });
@@ -314,7 +329,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
         style={{ transform: drag ? `translateX(${drag * 0.4}px)` : undefined, transition: drag ? "none" : "transform .15s" }}>
         {drag < -40 && <div className="swipe-hint again">Again</div>}
         {drag > 40 && <div className="swipe-hint good">Good</div>}
-        {rendered && <Paper card={card} html={showAnswer ? rendered.back : rendered.front} css={rendered.css} dark={dark}>
+        {rendered && <Paper card={card} html={showAnswer ? rendered.back : rendered.front} side={showAnswer ? "back" : "front"} css={rendered.css} dark={dark}>
           {typing && !showAnswer && <div style={{ marginTop: 12 }} onClick={(e) => e.stopPropagation()}><input className="typeans" autoFocus={false} placeholder="Type the answer, then Enter" value={typed} onChange={(e) => setTyped(e.target.value)} autoCapitalize="none" autoCorrect="off" /></div>}
           {!showAnswer && hint && hintText && <div className="hint-line" onClick={(e) => e.stopPropagation()}>{hintText}</div>}
           {showAnswer && (hookOpen || hookText) && (

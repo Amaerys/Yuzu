@@ -7,6 +7,7 @@ import { renderCard } from "../lib/render";
 import { IconClose, YuzuMark } from "./icons";
 import { Paper } from "./Study";
 import { useBack } from "./useBack";
+import { sfx } from "./sfx";
 
 export const BOSS_SIZE = 20, BOSS_PASS = 0.85, BOSS_MIN_STABILITY = 7;
 
@@ -28,7 +29,7 @@ export function Boss({ path, view, name, onExit }: { path: string; view: View; n
   useEffect(() => { shownAt.current = Date.now(); setShow(false); }, [card?.id]);
   const done = idx >= cards.length;
   const score = cards.length ? hits / cards.length : 0;
-  useEffect(() => { if (done && cards.length) store.recordBoss(key, score, score >= BOSS_PASS); }, [done]);
+  useEffect(() => { if (done && cards.length) { store.recordBoss(key, score, score >= BOSS_PASS); score >= BOSS_PASS ? sfx.win() : sfx.lose(); } }, [done]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (done) return; if (e.key === " " || e.key === "Enter") { e.preventDefault(); if (!show) setShow(true); } if (show && e.key === "1") grade(false); if (show && (e.key === "3" || e.key === "2" || e.key === "4")) grade(true); if (e.key === "Escape") onExit(); };
     window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey);
@@ -37,6 +38,7 @@ export function Boss({ path, view, name, onExit }: { path: string; view: View; n
   async function grade(ok: boolean) {
     if (!card || busy.current) return;
     busy.current = true;
+    sfx.answer(ok ? 3 : 1);
     try { await store.answer(card.id, ok ? 3 : 1, Date.now() - shownAt.current); } finally { busy.current = false; }
     if (ok) setHits((h) => h + 1);
     setIdx((i) => i + 1);
@@ -54,7 +56,7 @@ export function Boss({ path, view, name, onExit }: { path: string; view: View; n
         <div className="study-body"><div className="done">
           <YuzuMark size={56} />
           <div className="boss-score">{Math.round(score * 100)}%</div>
-          <div style={{ fontWeight: 700, fontSize: 20 }}>{passed ? `${name} boss defeated` : "Not this time"}</div>
+          <div className="px" style={{ fontSize: 20, lineHeight: "20px", color: passed ? "var(--yuzu)" : "var(--clay)" }}>{passed ? "★ Boss defeated ★" : "Not this time"}</div><div className="small muted" style={{ marginTop: 6 }}>{name}</div>
           <p className="muted small">{hits} of {cards.length} recalled without hints. {passed ? "This counts toward the system level." : `You need ${Math.round(BOSS_PASS * 100)}%. The misses are scheduled sooner; try again in a few days.`}</p>
           <button className="btn primary" onClick={onExit}>Done</button>
         </div></div></div>
@@ -69,7 +71,7 @@ export function Boss({ path, view, name, onExit }: { path: string; view: View; n
       </div>
       <div className="row small muted" style={{ padding: "0 14px 6px" }}><span className="chip yuzu">boss fight · {name}</span><span className="grow" /><span>{hits} right</span></div>
       <div className="study-body" onClick={() => !show && setShow(true)}>
-        {rendered && <Paper card={card} html={show ? rendered.back : rendered.front} css={rendered.css} dark={store.settings.nightCards} />}
+        {rendered && <Paper card={card} html={show ? rendered.back : rendered.front} side={show ? "back" : "front"} css={rendered.css} dark={store.settings.nightCards} />}
       </div>
       {!show ? <div className="show-bar"><button className="btn primary block" onClick={() => setShow(true)}>Show answer</button></div>
         : <div className="answer-bar"><button className="again" onClick={() => grade(false)}>Missed</button><button className="good" onClick={() => grade(true)}>Got it</button></div>}

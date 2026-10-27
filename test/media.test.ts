@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import zlib from "node:zlib";
-import { importMedia, imageRefs, readMediaMap } from "../src/import/media.ts";
+import { importMedia, imageRefs, mediaRefs, readMediaMap, YUZU_MEDIA_MARK } from "../src/import/media.ts";
+import { writeZip } from "../src/lib/zipwrite.ts";
+import { rewriteMedia, rewriteCssUrls } from "../src/lib/render.ts";
 import { ZipFile } from "../src/lib/zipfile.ts";
 
 // Minimal zip writer (stored entries) for fixtures.
@@ -32,7 +34,8 @@ test("media: legacy apkg (JSON media map) — referenced images extracted, missi
   assert.deepEqual([...imageRefs(notes)], ["ecg 1.png", "missing.jpg"]);
   const stored: Record<string, number> = {};
   const r = await importMedia(new Blob([zip]), notes, () => false, async (n, b) => { stored[n] = b.size; }, env);
-  assert.equal(r.stored, 1); assert.equal(r.missing, 1); assert.equal(stored["ecg 1.png"], png.length);
+  assert.equal(r.stored, 2); assert.equal(r.images, 1); assert.equal(r.sounds, 1); assert.equal(r.missing, 1); assert.equal(stored["ecg 1.png"], png.length); assert.equal(stored["a.mp3"], 2);
+  assert.deepEqual(r.missingNames, ["missing.jpg"]);
 });
 
 test("media: modern apkg (zstd protobuf media list, zstd entries)", async () => {
@@ -45,4 +48,41 @@ test("media: modern apkg (zstd protobuf media list, zstd entries)", async () => 
   const stored: Record<string, number> = {};
   const r = await importMedia(new Blob([zip]), notes, () => false, async (n, b) => { stored[n] = b.size; }, env);
   assert.equal(r.stored, 1); assert.equal(stored["ecg 1.png"], png.length);
+});
+
+test("media: refs cover sounds, <audio>, CSS url() and template files", () => {
+  const nt = { id: "t", name: "Basic", kind: "standard" as const, css: '@font-face{src:url("_pixel.woff")} .card{background:url(_bg.png)}', fields: ["Front"], templates: [{ name: "c", qfmt: '{{Front}}<img src="_logo.png">', afmt: "{{FrontSide}}" }] };
+  const ns = [{ id: "n", ntid: "t", guid: "g", fields: ['[sound:wort.mp3] <audio src="b%20c.ogg"></audio> <img src="http://x/y.png">', ""], tags: [], created: 0, modified: 0 }];
+  assert.deepEqual([...mediaRefs(ns as any, [nt as any])].sort(), ["_bg.png", "_logo.png", "_pixel.woff", "b c.ogg", "wort.mp3"]);
+});
+
+test("media: sounds render as play buttons, CSS urls resolve, unknown sounds show a placeholder", () => {
+  const html = rewriteMedia("Hör: [sound:wort.mp3] [sound:gone.mp3]", (n) => (n === "wort.mp3" ? "blob:w" : null));
+  assert.match(html, /class="yz-sound" data-src="blob:w"/); assert.match(html, /yz-sound missing/);
+  assert.equal(rewriteCssUrls('a{background:url("_bg.png")} b{background:url(http://x)}', (n) => (n === "_bg.png" ? "blob:b" : null)), 'a{background:url("blob:b")} b{background:url(http://x)}');
+});
+
+test("media: Yuzu media file round-trip (zip writer → importer), resume skips stored names", async () => {
+  const webp = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 9]);
+  const blob = await writeZip([{ name: YUZU_MEDIA_MARK, data: new TextEncoder().encode("{}") }, { name: "m/ecg 1.png", data: new Blob([webp]) }, { name: "m/a.mp3", data: new Uint8Array([7, 7, 7]) }, { name: "m/Ärger ß.png", data: png }]);
+  const ns = [...notes, { id: "n2", ntid: "t", guid: "g2", fields: ['<img src="Ärger ß.png">'], tags: [], created: 0, modified: 0 }];
+  const stored: Record<string, Blob> = {};
+  const r = await importMedia(blob, ns, (n) => n === "a.mp3", async (n, b) => { stored[n] = b; }, env);
+  assert.equal(r.stored, 2, JSON.stringify(r)); assert.equal(r.already, 1); assert.equal(r.missing, 1);
+  assert.equal(stored["ecg 1.png"].type, "image/webp"); assert.equal(stored["Ärger ß.png"].size, png.length);
+});
+
+test("media: picked folder of files (Anki's collection.media)", async () => {
+  const files = [new File([png], "ecg 1.png"), new File([new Uint8Array([1])], "a.mp3"), new File([png], "unused.png")];
+  const stored: string[] = [];
+  const r = await importMedia(files, notes, () => false, async (n) => { stored.push(n); }, env);
+  assert.deepEqual(stored.sort(), ["a.mp3", "ecg 1.png"]); assert.equal(r.missing, 1);
+});
+
+test("media: stop halfway keeps what was stored", async () => {
+  const many = Array.from({ length: 40 }, (_, i) => new File([png], `p${i}.png`));
+  const ns = [{ id: "n", ntid: "t", guid: "g", fields: [many.map((f) => `<img src="${f.name}">`).join("")], tags: [], created: 0, modified: 0 }];
+  const ac = new AbortController(); let n = 0;
+  const r = await importMedia(many, ns, () => false, async () => { if (++n === 10) ac.abort(); }, { ...env, signal: ac.signal }, { parallel: 1 });
+  assert.equal(r.stopped, true); assert.equal(r.stored, 10);
 });

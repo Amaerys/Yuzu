@@ -4,27 +4,38 @@ import { DAY } from "../scheduler/fsrs";
 import { systemColor } from "./theme";
 import { useMemo, useState } from "react";
 
-/** A yuzu cut in half: 8 segments fill as the daily goal is reached. */
-export function YuzuGoal({ value, max, size = 104, center, sub }: { value: number; max: number; size?: number; center?: string | number; sub?: string }) {
-  const segs = 8, cx = 52, cy = 52, R = 46, r0 = center !== undefined ? 24 : 10, gap = 0.05;
+/** A yuzu cut in half, drawn on a 30×30 pixel grid: 8 segments fill (yellow; orange while partly done) toward the daily goal. */
+export function YuzuGoal({ value, max, size = 150, center, sub }: { value: number; max: number; size?: number; center?: string | number; sub?: string }) {
   const frac = Math.min(1, max ? value / max : 0);
-  const filled = frac * segs;
-  const wedge = (i: number) => {
-    const a0 = (i / segs) * Math.PI * 2 - Math.PI / 2 + gap, a1 = ((i + 1) / segs) * Math.PI * 2 - Math.PI / 2 - gap;
-    const p = (a: number, r: number) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
-    return `M ${p(a0, r0)} L ${p(a0, R)} A ${R} ${R} 0 0 1 ${p(a1, R)} L ${p(a1, r0)} A ${r0} ${r0} 0 0 0 ${p(a0, r0)} Z`;
-  };
+  const cells = useMemo(() => {
+    const N = 30, c = 15, segs = 8, filled = frac * segs, out: [number, number, string][] = [];
+    const hole = center !== undefined ? 7.2 : 2.6;
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      const dx = x + 0.5 - c, dy = y + 0.5 - c, r = Math.hypot(dx, dy);
+      if (r > 14.6) continue;
+      let col: string;
+      if (r > 13.6) col = "#3a2a07";                        // outline
+      else if (r > 12.4) col = r > 13.1 ? "#c9971c" : "#f2d34b"; // rind
+      else if (r > 11.4) col = "#fff3c2";                    // pith ring
+      else if (r < hole) col = r > hole - 1 ? "#fff3c2" : "#1a1508"; // centre (dark hole for the number)
+      else {
+        let a = Math.atan2(dx, -dy); if (a < 0) a += Math.PI * 2; // 0 at the top, clockwise
+        const seg = Math.floor(a / (Math.PI * 2 / segs));
+        const edge = Math.min(a % (Math.PI * 2 / segs), Math.PI * 2 / segs - (a % (Math.PI * 2 / segs))) * r;
+        if (edge < 0.55) col = "#fff3c2";                    // membrane between segments
+        else { const f = Math.max(0, Math.min(1, filled - seg)); col = f >= 1 ? "#f2d34b" : f > 0 ? "#ff7a1a" : "#3b3220"; if (f >= 1 && (x + y) % 7 === 0) col = "#e0b52f"; }
+      }
+      out.push([x, y, col]);
+    }
+    return out;
+  }, [frac, center !== undefined]);
+  const label = String(center ?? `${Math.round(frac * 100)}%`);
+  const fs = label.length > 4 ? 2.4 : 4; // in grid units; 4 units = 20 px at 150 px size, so each font pixel is 2×2 screen pixels
   return (
-    <svg width={size} height={size} viewBox="0 0 104 104" className="ring" aria-label={`${value} of ${max}`}>
-      <circle cx={cx} cy={cy} r={51} fill="#2b2412" stroke="#d9b93a" strokeWidth="2.5" />
-      {Array.from({ length: segs }, (_, i) => {
-        const f = Math.max(0, Math.min(1, filled - i));
-        return <path key={i} d={wedge(i)} fill={f >= 1 ? "var(--yuzu)" : f > 0 ? "var(--orange)" : "#3b3220"} opacity={f > 0 && f < 1 ? 0.5 + f * 0.5 : 1} />;
-      })}
-      <circle cx={cx} cy={cy} r={r0 - 2} fill="#1a160a" />
-      {center !== undefined
-        ? <><text x={cx} y={cy + (sub ? 2 : 5)} textAnchor="middle" fontSize={String(center).length > 3 ? "13" : "16"} fontWeight="800" fill="var(--text)" style={{ fontVariationSettings: '"wdth" 85' }}>{center}</text>{sub && <text x={cx} y={cy + 13} textAnchor="middle" fontSize="7.5" fill="var(--muted)">{sub}</text>}</>
-        : <text x={cx} y={cy + 4} textAnchor="middle" fontSize="11" fontWeight="700" fill="var(--text)">{Math.round(frac * 100)}%</text>}
+    <svg width={size} height={size} viewBox="0 0 30 30" className="ring" shapeRendering="crispEdges" aria-label={`${value} of ${max} reviews today`}>
+      {cells.map(([x, y, c], i) => <rect key={i} x={x} y={y} width={1} height={1} fill={c} />)}
+      <text x={15} y={sub ? 15.6 : 17} textAnchor="middle" fontSize={fs} fill="var(--text)" style={{ fontFamily: "var(--px)" }}>{label}</text>
+      {sub && <text x={15} y={19.4} textAnchor="middle" fontSize={2} fill="#a99e86" style={{ fontFamily: "var(--px)" }}>{sub}</text>}
     </svg>
   );
 }
@@ -66,7 +77,7 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, top,
   const goalDone = stats.today >= stats.goal && stats.goal > 0;
   return (
     <div className="screen">
-      <div className="row" style={{ marginBottom: 6 }}><YuzuMark /><h1 style={{ margin: 0 }}>Yuzu</h1><div className="grow" />
+      <div className="brand"><YuzuMark size={32} /><h1>Yuzu</h1><div className="grow" />
         {store.syncConfigured() && <span className={"chip" + (store.syncStatus.state === "error" ? "" : " yuzu")} title={store.syncStatus.message} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "syncing…" : store.syncStatus.state === "error" ? "sync failed" : store.hasUnsynced() ? "unsynced" : "synced"}</span>}
       </div>
       {store.inbox.length > 0 && onInbox && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginBottom: 10, borderColor: "var(--yuzu)" }} onClick={onInbox}><span className="grow"><b>{store.inbox.length} new pack{store.inbox.length === 1 ? "" : "s"} from Claude</b><div className="small muted">Review the cards before they join your collection</div></span><span className="chip yuzu">Review</span></button>}

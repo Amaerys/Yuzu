@@ -1,4 +1,5 @@
 import { store } from "../lib/store";
+import { fmtDate } from "../lib/dates";
 import { DAY } from "../scheduler/fsrs";
 import { systemColor } from "./theme";
 import { useMemo } from "react";
@@ -18,13 +19,13 @@ function Calibration() {
     <div className="card-box">
       <div className="small muted" style={{ marginBottom: 6 }}>Predicted recall (horizontal) vs what actually happened (vertical). Dots on the line = the scheduler knows your memory.</div>
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", maxWidth: 420, display: "block" }}>
-        <line x1={x(0)} y1={y(0)} x2={x(1)} y2={y(1)} stroke="var(--line)" strokeDasharray="4 4" />
+        <line x1={x(0)} y1={y(0)} x2={x(1)} y2={y(1)} stroke="var(--line)" strokeDasharray="2 4" strokeWidth={2} shapeRendering="crispEdges" />
         <line x1={x(0)} y1={y(0)} x2={x(1)} y2={y(0)} stroke="var(--line)" /><line x1={x(0)} y1={y(0)} x2={x(0)} y2={y(1)} stroke="var(--line)" />
-        {[0, 0.5, 1].map((t) => <text key={t} x={x(t)} y={H - 4} fontSize="9" fill="var(--muted)" textAnchor="middle">{t * 100}%</text>)}
-        {[0.5, 1].map((t) => <text key={t} x={pad - 2} y={y(t) + 3} fontSize="8" fill="var(--muted)" textAnchor="end">{t * 100}%</text>)}
-        {rows.map((r) => <circle key={r.bucket} cx={x(r.predicted)} cy={y(r.observed)} r={3 + Math.min(5, Math.log10(r.n + 1) * 2)} fill="var(--orange)" opacity={0.85}><title>{r.bucket}: predicted {(r.predicted * 100).toFixed(0)}%, observed {(r.observed * 100).toFixed(0)}% ({r.n} reviews)</title></circle>)}
+        {[0, 0.5, 1].map((t) => <text key={t} x={x(t)} y={H - 4} fontSize="10" fill="var(--muted)" textAnchor="middle" style={{ fontFamily: "var(--px)" }}>{t * 100}%</text>)}
+        {[0.5, 1].map((t) => <text key={t} x={pad - 2} y={y(t) + 3} fontSize="10" fill="var(--muted)" textAnchor="end" style={{ fontFamily: "var(--px)" }}>{t * 100}%</text>)}
+        {rows.map((r) => { const h = 2 + Math.round(Math.min(4, Math.log10(r.n + 1) * 1.6)); return <rect key={r.bucket} x={Math.round(x(r.predicted)) - h} y={Math.round(y(r.observed)) - h} width={h * 2} height={h * 2} fill="var(--orange)" shapeRendering="crispEdges"><title>{r.bucket}: predicted {(r.predicted * 100).toFixed(0)}%, observed {(r.observed * 100).toFixed(0)}% ({r.n} reviews)</title></rect>; })}
       </svg>
-      <div className="small muted">{store.settings.fit ? `Weights fitted ${new Date(store.settings.fit.at).toLocaleDateString()} on ${store.settings.fit.n.toLocaleString()} reviews.` : "Using default FSRS weights; fitting runs automatically once there is enough history (Settings → Studying)."}</div>
+      <div className="small muted">{store.settings.fit ? `Weights fitted ${fmtDate(store.settings.fit.at)} on ${store.settings.fit.n.toLocaleString()} reviews.` : "Using default FSRS weights; fitting runs automatically once there is enough history (Settings → Studying)."}</div>
     </div>
   );
 }
@@ -78,7 +79,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
       <h2>Last 12 weeks</h2>
       <div className="card-box" style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gridAutoFlow: "column", gridTemplateRows: "repeat(7, 1fr)", gap: 3 }}>
         {perDay.map((n, i) => (
-          <div key={i} title={`${n} reviews`} style={{ aspectRatio: "1", borderRadius: 3, background: n === 0 ? "var(--ink-3)" : `rgba(255,122,26,${0.25 + 0.75 * (n / maxD)})` }} />
+          <div key={i} title={`${n} reviews`} style={{ aspectRatio: "1", background: n === 0 ? "var(--ink-3)" : n / maxD > 0.66 ? "var(--yuzu)" : n / maxD > 0.33 ? "var(--orange)" : "color-mix(in srgb, var(--orange) 45%, var(--ink-3))" }} />
         ))}
       </div>
       <h2>Cards</h2>
