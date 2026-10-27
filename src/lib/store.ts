@@ -8,8 +8,8 @@ import { parsePack, describePack } from "../import/pack";
 import { noteTitle } from "./render";
 import { stamp, observe } from "./clock";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
-import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, type MediaEnv } from "../import/media";
-import { writeZip, streamZip } from "./zipwrite";
+import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, type MediaEnv, type FolderHandles } from "../import/media";
+import { writeZip, streamZip, ZipParts } from "./zipwrite";
 import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
 export interface Settings {
@@ -665,25 +665,45 @@ export class Store {
     return [...out.values()].sort((a, b) => a.deck.localeCompare(b.deck) || a.name.localeCompare(b.name));
   }
   /** Add media from an Anki export with media, a Yuzu media file, or files picked from Anki's media folder. Stopping keeps what is stored; running it again resumes. */
-  async addMediaFrom(input: Blob | File[], env: MediaEnv) {
-    // Every stored file is read back from the database before it counts. The in-memory copy is then the
-    // database's own (not the freshly made picture), so a big library never piles gigabytes of temporary
-    // pictures into the browser. A file that doesn't read back isn't kept and stays "missing", so running
-    // the import again retries it.
-    const batch: { name: string; blob: Blob }[] = []; let unreadable = 0;
+  async addMediaFrom(input: Blob | File[] | FolderHandles, env: MediaEnv) {
+    // A file counts only once the database has it and it reads back in full; until then it is not in
+    // `this.media`, so nothing exists only in memory. If the browser refuses to save, the import stops
+    // with the browser's own reason instead of carrying on.
+    const batch: { name: string; blob: Blob }[] = []; const pending = new Set<string>(); let unreadable = 0;
     const flush = async () => {
-      if (!batch.length) return; const items = batch.splice(0); await db.putMany("media", items);
+      if (!batch.length) return; const items = batch.splice(0);
+      try { await db.putMany("media", items); }
+      catch (e: any) {
+        for (const { name } of items) pending.delete(name);
+        const why = `${e?.name ?? "Error"}${e?.message ? ": " + e.message : ""}`;
+        db.setMeta("lastError", { at: Date.now(), where: "save media", message: why }).catch(() => {});
+        throw Object.assign(new Error(`The browser refused to save more media (${why}). What was saved before this is kept.`), { fatal: true, cause: e });
+      }
       for (const { name } of items) {
-        let ok = false;
-        try { const row = await db.getOne<{ name: string; blob: Blob }>("media", name); if (row?.blob) { await row.blob.arrayBuffer(); this.media.set(name, row.blob); ok = true; } } catch { /* not readable */ }
-        if (!ok) { unreadable++; this.media.delete(name); try { await db.deleteMany("media", [name]); } catch { /* best effort */ } }
+        pending.delete(name);
+        try { const row = await db.getOne<{ name: string; blob: Blob }>("media", name); if (row?.blob) { await row.blob.arrayBuffer(); this.media.set(name, row.blob); continue; } } catch { /* not readable */ }
+        unreadable++; try { await db.deleteMany("media", [name]); } catch { /* best effort */ }
       }
     };
     try { await navigator.storage?.persist?.(); } catch { /* best effort: keeps the browser from evicting a big library */ }
     try {
-      const r = await importMedia(input, this.notes.values(), (n) => this.media.has(n), async (name, blob) => { this.media.set(name, blob); batch.push({ name, blob }); if (batch.length >= 40) await flush(); }, env, { notetypes: this.notetypes.values(), skipField: this.skipHidden() });
-      await flush(); r.stored -= unreadable; r.failed += unreadable; return r;
-    } finally { await flush(); this.mediaUrls.clear(); this.bump(); }
+      const r = await importMedia(input, this.notes.values(), (n) => this.media.has(n) || pending.has(n), async (name, blob) => { pending.add(name); batch.push({ name, blob }); if (batch.length >= 40) await flush(); }, env, { notetypes: this.notetypes.values(), skipField: this.skipHidden() });
+      await flush();
+      const kept = r.stored - unreadable; r.failed += unreadable; r.stored = kept; return r;
+    } finally { this.mediaUrls.clear(); this.bump(); }
+  }
+  /**
+   * PC: make the phone's media file straight from Anki's media folder — pictures are shrunk and written into
+   * the file on disk, nothing is stored in this browser. Parts of up to 1.8 GB go into `dest`.
+   */
+  async mediaFileFromFolder(src: FolderHandles, dest: any, env: MediaEnv) {
+    const stampDate = ((d) => `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`)(new Date());
+    const mark = new TextEncoder().encode(JSON.stringify({ yuzu_media: 1, at: Date.now() }));
+    const open = async (n: number) => { const name = `yuzu-media-${stampDate}-${n}.zip`; const fh = await dest.getFileHandle(name, { create: true }); const w = await fh.createWritable(); return { name, write: (c: Uint8Array) => w.write(c), close: () => w.close() }; };
+    const zip = new ZipParts(open, { name: YUZU_MEDIA_MARK, data: mark });
+    const r = await importMedia(src, this.notes.values(), () => false, async (name, blob) => { await zip.add("m/" + name, new Uint8Array(await blob.arrayBuffer())); }, env, { notetypes: this.notetypes.values(), skipField: this.skipHidden() });
+    const parts = await zip.finish();
+    return { ...r, parts };
   }
   /** Read every stored file once, in full, and report the ones the browser can no longer read. Deletes nothing. */
   async checkMedia(onProgress?: (msg: string) => void): Promise<{ checked: number; unreadable: string[]; errors: Record<string, number> }> {
@@ -713,7 +733,7 @@ export class Store {
     const groups: [string, Blob][][] = []; let group: [string, Blob][] = [], size = 0;
     for (const [n, b] of all) { if (group.length && (size + b.size > PART || group.length >= MAX)) { groups.push(group); group = []; size = 0; } group.push([n, b]); size += b.size; }
     if (group.length) groups.push(group);
-    const stampDate = new Date().toISOString().slice(0, 10).split("-").reverse().join("-");
+    const stampDate = ((d) => `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`)(new Date());
     const reread = async (zipName: string) => {
       const name = zipName.slice(2); const row = await db.getOne<{ name: string; blob: Blob }>("media", name);
       if (row?.blob) this.media.set(name, row.blob);

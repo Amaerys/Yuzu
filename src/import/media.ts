@@ -118,6 +118,13 @@ async function zipSource(file: Blob, env: MediaEnv): Promise<Source> {
   };
 }
 
+/** A folder opened with the File System Access API: each file is opened fresh when it is needed. */
+export interface FolderHandles { handles: Map<string, { getFile(): Promise<File> }> }
+function handleSource(h: FolderHandles): Source {
+  const byName = new Map<string, { getFile(): Promise<File> }>(); for (const [n, f] of h.handles) byName.set(n.normalize("NFC"), f);
+  const find = forgiving(byName);
+  return { kind: "folder", has: (n) => find(n) !== undefined, names: () => byName.keys(), read: async (n) => { const f = find(n); return f ? f.getFile() : null; } };
+}
 function folderSource(files: Iterable<File>): Source {
   const byName = new Map<string, File>(); for (const f of files) byName.set(f.name.normalize("NFC"), f);
   const find = forgiving(byName);
@@ -130,9 +137,9 @@ const sec = (ms: number) => { const s = Math.round(ms / 1000); return s < 90 ? `
  * Bring the media that `notes`/`notetypes` reference into the device. `have` skips names already
  * stored (so a stopped import resumes where it left off); `store` persists one file.
  */
-export async function importMedia(input: Blob | File[], notes: Iterable<Note>, have: (name: string) => boolean, store: (name: string, blob: Blob) => Promise<void>, env: MediaEnv, opts: { maxPx?: number; notetypes?: Iterable<Notetype>; parallel?: number; skipField?: (note: Note, index: number) => boolean } = {}): Promise<MediaImportResult> {
+export async function importMedia(input: Blob | File[] | FolderHandles, notes: Iterable<Note>, have: (name: string) => boolean, store: (name: string, blob: Blob) => Promise<void>, env: MediaEnv, opts: { maxPx?: number; notetypes?: Iterable<Notetype>; parallel?: number; skipField?: (note: Note, index: number) => boolean } = {}): Promise<MediaImportResult> {
   env.onProgress?.("Reading the file list", 0);
-  const src = Array.isArray(input) ? folderSource(input) : await zipSource(input, env);
+  const src = Array.isArray(input) ? folderSource(input) : "handles" in input ? handleSource(input) : await zipSource(input, env);
   const refs = mediaRefs(notes, opts.notetypes, opts.skipField);
   const res: MediaImportResult = { stored: 0, images: 0, sounds: 0, other: 0, already: 0, missing: 0, failed: 0, bytes: 0, missingNames: [] };
   const wanted: string[] = [];
@@ -165,11 +172,14 @@ export async function importMedia(input: Blob | File[], notes: Iterable<Note>, h
         await store(name, blob);
         res.stored++; res.bytes += blob.size;
         if (IMG.test(name)) res.images++; else if (AUDIO.test(name)) res.sounds++; else res.other++;
-      } catch { res.failed++; }
+      } catch (e: any) { if (e?.fatal) { fatal ??= e; return; } res.failed++; }
       finally { done++; report(); }
+      if (fatal) return;
     }
   };
+  let fatal: any = null;
   await Promise.all(Array.from({ length: Math.max(1, opts.parallel ?? 3) }, worker));
+  if (fatal) throw fatal; // e.g. the browser refused to save: stop at once and say why
   env.onProgress?.(res.stopped ? "Stopped" : "Done", 1);
   return res;
 }

@@ -111,7 +111,7 @@ export async function putMany(store: StoreName, values: unknown[], batch = 2000,
   for (let i = 0; i < values.length; i += batch) {
     const t = db.transaction(store, "readwrite");
     const os = t.objectStore(store);
-    for (const v of values.slice(i, i + batch)) os.put(v);
+    try { for (const v of values.slice(i, i + batch)) os.put(v); } catch (e) { try { t.abort(); } catch { /* already over */ } throw e; } // all or nothing
     await done(t);
     onProgress?.(Math.min(1, (i + batch) / values.length));
   }

@@ -56,3 +56,46 @@ export async function writeZip(files: ZipInput[], onFile?: ((i: number) => void)
 export async function streamZip(files: ZipInput[], out: { write(c: Uint8Array | Blob): Promise<void> }, opts: ZipOpts = {}): Promise<number> {
   return zipTo(files, (c) => out.write(c), false, opts);
 }
+
+/**
+ * Write entries one at a time into numbered ZIP parts (each under `limit` bytes / `maxFiles` entries), opening each
+ * part with `openPart`. Every part starts with `first` (e.g. the Yuzu media mark). Calls are serialized, so several
+ * workers can add at once. Memory: one file at a time.
+ */
+export class ZipParts {
+  private chain: Promise<unknown> = Promise.resolve();
+  private out: { write(c: Uint8Array): Promise<void>; close(): Promise<void> } | null = null;
+  private cd: Uint8Array[] = []; private offset = 0; private count = 0; private part = 0;
+  readonly parts: { name: string; size: number; files: number }[] = [];
+  constructor(private openPart: (n: number) => Promise<{ name: string; write(c: Uint8Array): Promise<void>; close(): Promise<void> }>, private first?: ZipInput & { data: Uint8Array }, private limit = 1800 * 1048576, private maxFiles = 60000) {}
+  add(name: string, data: Uint8Array): Promise<void> { const p = this.chain.then(() => this.write(name, data)); this.chain = p.catch(() => {}); return p; }
+  private async open() {
+    const o = await this.openPart(++this.part); this.out = o; this.cd = []; this.offset = 0; this.count = 0;
+    this.parts.push({ name: o.name, size: 0, files: 0 });
+    if (this.first) await this.entry(this.first.name, this.first.data, false);
+  }
+  private async write(name: string, data: Uint8Array) {
+    if (this.out && (this.offset + data.length + 1024 > this.limit || this.count >= this.maxFiles)) await this.closePart();
+    if (!this.out) await this.open();
+    await this.entry(name, data, true);
+  }
+  private async entry(nameStr: string, bytes: Uint8Array, counts: boolean) {
+    const name = new TextEncoder().encode(nameStr); const crc = (crc32(bytes) ^ 0xffffffff) >>> 0; const size = bytes.length;
+    const lh = new Uint8Array(30 + name.length); const lv = new DataView(lh.buffer);
+    lv.setUint32(0, 0x04034b50, true); lv.setUint16(4, 20, true); lv.setUint16(6, 0x0800, true);
+    lv.setUint32(14, crc, true); lv.setUint32(18, size, true); lv.setUint32(22, size, true); lv.setUint16(26, name.length, true); lh.set(name, 30);
+    const ch = new Uint8Array(46 + name.length); const cv = new DataView(ch.buffer);
+    cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true); cv.setUint16(8, 0x0800, true);
+    cv.setUint32(16, crc, true); cv.setUint32(20, size, true); cv.setUint32(24, size, true); cv.setUint16(28, name.length, true); cv.setUint32(42, this.offset, true); ch.set(name, 46);
+    await this.out!.write(lh); await this.out!.write(bytes); this.cd.push(ch); this.offset += lh.length + size; this.count++;
+    const p = this.parts[this.parts.length - 1]; p.size = this.offset; if (counts) p.files++;
+  }
+  private async closePart() {
+    if (!this.out) return;
+    const cdLen = this.cd.reduce((a, c) => a + c.length, 0); for (const c of this.cd) await this.out.write(c);
+    const eocd = new Uint8Array(22); const ev = new DataView(eocd.buffer);
+    ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, this.count, true); ev.setUint16(10, this.count, true); ev.setUint32(12, cdLen, true); ev.setUint32(16, this.offset, true);
+    await this.out.write(eocd); await this.out.close(); this.parts[this.parts.length - 1].size = this.offset + cdLen + 22; this.out = null;
+  }
+  async finish() { await this.chain; await this.closePart(); return this.parts; }
+}

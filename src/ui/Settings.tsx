@@ -25,16 +25,43 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
   const [mediaFrac, setMediaFrac] = useState(0);
   const [quota, setQuota] = useState<{ used: number; free: number; persisted: boolean } | null>(null);
   useEffect(() => { (async () => { try { const e = await navigator.storage?.estimate?.(); const p = (await navigator.storage?.persisted?.()) ?? false; if (e) setQuota({ used: e.usage ?? 0, free: Math.max(0, (e.quota ?? 0) - (e.usage ?? 0)), persisted: p }); } catch { /* not available */ } })(); }, [mediaMsg]);
-  async function onMedia(input: File | File[]) {
+  async function onMedia(input: File | File[] | { handles: Map<string, { getFile(): Promise<File> }> }) {
     setBusy(true); setMediaBusy(true); setMediaMsg(""); setMediaFrac(0); stopRef.current = new AbortController();
     try {
       const r = await holdAwake(() => store.addMediaFrom(input, { inflateRaw, zstd, signal: stopRef.current!.signal, onProgress: (m, f) => { setMediaMsg(m); if (f !== undefined) setMediaFrac(f); } }));
       const parts = [r.images && `${r.images.toLocaleString()} images`, r.sounds && `${r.sounds.toLocaleString()} sounds`, r.other && `${r.other.toLocaleString()} template file${r.other === 1 ? "" : "s"}`].filter(Boolean).join(", ");
-      setMediaMsg((r.stopped ? "Stopped — run it again with the same file to continue. " : "") + (r.stored ? `Added ${parts} (${(r.bytes / 1048576).toFixed(0)} MB).` : "Nothing new to add.") + (r.already ? ` ${r.already.toLocaleString()} were already here.` : "") + (r.missing ? ` ${r.missing.toLocaleString()} your cards use are not in ${Array.isArray(input) ? "these files" : "this file"}.` : "") + (r.failed ? ` ${r.failed} could not be read.` : ""));
+      setMediaMsg((r.stopped ? "Stopped — run it again with the same file to continue. " : "") + (r.stored ? `Added ${parts} (${(r.bytes / 1048576).toFixed(0)} MB).` : "Nothing new to add.") + (r.already ? ` ${r.already.toLocaleString()} were already here.` : "") + (r.missing ? ` ${r.missing.toLocaleString()} your cards use are not in ${input instanceof Blob ? "this file" : "this folder"}.` : "") + (r.failed ? ` ${r.failed} could not be read.` : ""));
     } catch (e: any) { setMediaMsg("Failed: " + (e?.message ?? e)); }
     finally { setBusy(false); setMediaBusy(false); stopRef.current = null; if (mediaRef.current) mediaRef.current.value = ""; if (folderRef.current) folderRef.current.value = ""; }
   }
   async function hasMedia(file: Blob) { try { const z = new ZipFile(file, inflateRaw); const l = await z.list(); return l.length > 3 && l.some((e) => e.name === "media"); } catch { return false; } }
+  const canPickDir = typeof (window as any).showDirectoryPicker === "function";
+  const [ankiDir, setAnkiDir] = useState<{ name: string; handles: Map<string, { getFile(): Promise<File> }> } | null>(null);
+  /** Open a folder with the File System Access API (PC Chrome/Edge): files are opened fresh when read. */
+  async function pickAnkiFolder(): Promise<typeof ankiDir> {
+    let dir: any; try { dir = await (window as any).showDirectoryPicker({ id: "anki-media", mode: "read" }); } catch (e: any) { if (e?.name !== "AbortError") setMediaMsg("Failed: " + (e?.message ?? e)); return null; }
+    setBusy(true); setMediaBusy(true); setMediaMsg(`Reading “${dir.name}”`); setMediaFrac(0);
+    try {
+      const handles = new Map<string, { getFile(): Promise<File> }>(); let n = 0;
+      for await (const [name, h] of dir.entries()) { if (h.kind === "file") handles.set(name, h); if (++n % 2000 === 0) setMediaMsg(`Reading “${dir.name}” · ${n.toLocaleString()} files`); }
+      const got = { name: dir.name as string, handles }; setAnkiDir(got); return got;
+    } finally { setBusy(false); setMediaBusy(false); }
+  }
+  async function onChooseFolder() {
+    if (!canPickDir) { folderRef.current?.click(); return; }
+    const d = await pickAnkiFolder(); if (d) await onMedia(d);
+  }
+  async function onPhoneFileFromFolder() {
+    const src = ankiDir; if (!src) return;
+    let dest: any; try { dest = await (window as any).showDirectoryPicker({ id: "yuzu-media", mode: "readwrite", startIn: "downloads" }); } catch (e: any) { if (e?.name !== "AbortError") setMediaMsg("Failed: " + (e?.message ?? e)); return; }
+    setBusy(true); setMediaBusy(true); setMediaMsg("Starting"); setMediaFrac(0); stopRef.current = new AbortController();
+    try {
+      const r = await holdAwake(() => store.mediaFileFromFolder(src, dest, { inflateRaw, zstd, signal: stopRef.current!.signal, onProgress: (m, f) => { setMediaMsg(m); if (f !== undefined) setMediaFrac(f); } }));
+      const list = r.parts.map((p) => `${p.name} (${(p.size / 1048576).toFixed(0)} MB, ${p.files.toLocaleString()} files)`).join(", ");
+      setMediaMsg((r.stopped ? "Stopped early — the file holds what was done so far. " : "") + (r.parts.length ? `Saved ${list} in “${dest.name}”. On the phone press “Choose file” and pick ${r.parts.length > 1 ? "each one" : "it"}.` : "Nothing to save.") + (r.missing ? ` ${r.missing.toLocaleString()} files your cards use aren't in “${src.name}”.` : "") + (r.failed ? ` ${r.failed.toLocaleString()} couldn't be read.` : ""));
+    } catch (e: any) { setMediaMsg("Failed: " + (e?.message ?? e)); }
+    finally { setBusy(false); setMediaBusy(false); stopRef.current = null; }
+  }
   async function onCheckMedia() {
     setBusy(true); setMediaBusy(true); setMediaMsg("Checking stored files");
     try {
@@ -203,13 +230,23 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         </>) : (<>
           <div className="row">
             <button className="btn primary grow" disabled={busy} onClick={() => mediaRef.current?.click()}>Choose file</button>
-            <button className="btn grow" disabled={busy} onClick={() => folderRef.current?.click()}>Choose media folder</button>
+            <button className="btn grow" disabled={busy} onClick={onChooseFolder}>Choose media folder</button>
           </div>
+          {canPickDir && (
+            <div className="field" style={{ marginTop: 10 }}>
+              <label>Phone media file straight from Anki <span className="muted">(PC — nothing is stored in this browser)</span></label>
+              <div className="row">
+                <button className="btn grow" disabled={busy} onClick={pickAnkiFolder}>{ankiDir ? `1. “${ankiDir.name}” · ${ankiDir.handles.size.toLocaleString()} files` : "1. Pick Anki's media folder"}</button>
+                <button className="btn primary grow" disabled={busy || !ankiDir} onClick={onPhoneFileFromFolder}>2. Save phone media file…</button>
+              </div>
+            </div>
+          )}
           {mediaMsg && <p className="small" style={{ marginBottom: 0 }}>{mediaMsg}</p>}
           <details className="how"><summary className="small">How to bring your Anki media in</summary>
             <ol className="small muted">
               <li><b>Phone only:</b> in AnkiDroid or Anki, export your collection as <b>.colpkg</b> with <b>“Include media”</b> ticked, then choose that file here. Big libraries take a while; you can stop and run it again — it continues where it left off.</li>
-              <li><b>PC first (fastest for big libraries):</b> open Yuzu on the PC, press <b>Choose media folder</b> and pick Anki's <code>collection.media</code> folder (Anki → Tools → Check Media → View Files shows it). Then press <b>Save media file</b>, copy that file to the phone and choose it here — it is already shrunk, so it loads in minutes.</li>
+              <li><b>PC first (fastest for big libraries):</b> on the PC, under <b>Phone media file straight from Anki</b>, press <b>1</b> and pick Anki's <code>collection.media</code> folder (Anki → Tools → Check Media → View Files shows it), then <b>2</b> and pick where to save (e.g. Downloads). Copy the file(s) to the phone and choose them here — already shrunk, so they load in minutes.</li>
+              <li><b>Study with pictures on the PC too:</b> press <b>Choose media folder</b> and pick the same folder.</li>
               <li>Only files your cards use are kept. Images are resized to phone size (usually 5–10× smaller); sounds stay as they are.</li>
             </ol>
           </details>
@@ -319,7 +356,7 @@ function MissingMedia() {
     const q = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`;
     const rows = [["file", "type", "notes using it", "deck", "example card text", "note id"].map(q).join(","), ...(list ?? []).map((x) => [x.name, x.kind, x.notes, x.deck, x.example, x.noteId].map(q).join(","))];
     const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob(["\ufeff" + rows.join("\r\n")], { type: "text/csv" }));
-    a.download = `yuzu-missing-media-${new Date().toISOString().slice(0, 10).split("-").reverse().join("-")}.csv`; document.body.appendChild(a); a.click(); a.remove();
+    a.download = `yuzu-missing-media-${((d) => `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`)(new Date())}.csv`; document.body.appendChild(a); a.click(); a.remove();
   }
   return (
     <details className="how" onToggle={(e) => { if ((e.target as HTMLDetailsElement).open && !list) setList(store.missingMedia()); }}>
