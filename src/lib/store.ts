@@ -45,13 +45,15 @@ export interface Settings {
   sfx: boolean;
   /** Play card sounds automatically when a side appears (per device). */
   autoplay: boolean;
+  /** Anki deck path → Yuzu category, learned from curation files; applied to new cards on every later Anki import (synced). */
+  deckMap: Record<string, string>;
   smart: SmartDeck[];
   sync: { owner: string; repo: string; token: string; auto: boolean };
 }
 export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, maxReviewsPerDay: 0, dueOrder: "forgotten", rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
-  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true,
+  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, deckMap: {},
 };
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
 export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number; pending?: boolean }
@@ -84,6 +86,15 @@ export function interleaveBySystem<T>(list: T[], groupOf: (x: T) => string): T[]
     const x = pending.splice(idx, 1)[0]; out.push(x); last = groupOf(x);
   }
   return out;
+}
+
+/** Category for an Anki deck path: exact match, else the longest mapped parent with the rest of the path kept. */
+export function mapDeck(source: string, map: Record<string, string>): string | null {
+  if (!map || !source) return null;
+  if (map[source]) return map[source] === source ? null : map[source];
+  let p = source;
+  while (p.includes("::")) { p = p.slice(0, p.lastIndexOf("::")); const to = map[p]; if (to) return to + source.slice(p.length); }
+  return null;
 }
 
 export class Store {
@@ -390,23 +401,35 @@ export class Store {
   /** Merge an import. Existing cards keep their Yuzu review state unless they had none. */
   async applyImport(res: ImportResult, onProgress?: (msg: string, frac: number) => void) {
     for (const nt of res.notetypes) this.notetypes.set(nt.id, nt);
-    let newNotes = 0, newCards = 0, updated = 0;
+    let newNotes = 0, newCards = 0, updated = 0, organized = 0;
     const notesOut: Note[] = []; const cardsOut: Card[] = [];
+    const lastAt = (await db.getMeta<{ at: number } | null>("lastImport", null))?.at ?? 0;
+    const sameTags = (a: string[], b: string[]) => a.length === b.length && a.every((t, i) => t === b[i]);
     for (const n of res.notes) {
-      if ((this.tombstones["n:" + n.id] ?? -1) >= n.modified) continue; // merged away in Yuzu
+      if (this.tombstones["n:" + n.id] !== undefined) continue; // merged or removed in Yuzu: stays gone even when Anki edits it later
       const existing = this.notes.get(n.id);
-      if (!existing) newNotes++; else if (existing.modified < n.modified) updated++; else continue;
+      if (!existing) { newNotes++; const m = { ...n, ankiMod: n.modified }; this.notes.set(n.id, m); notesOut.push(m); continue; }
+      // Did Anki change the note since the version Yuzu has? Compare with Anki's own time, not Yuzu's
+      // (organizing or tagging in Yuzu must not block content fixes from the deck's author).
+      const base = existing.ankiMod ?? (lastAt || existing.modified);
+      if (n.modified <= base) continue;
       // Keep tags added in Yuzu (auto::…, needs-review, pack tags) when Anki's version of the note is newer.
-      const keepTags = existing ? existing.tags.filter((t) => t.startsWith("auto::") || t.startsWith("needs-review::") || t.startsWith("manual::") || t.startsWith("leech") || t === "ask-claude") : [];
-      const importTags = existing?.tags.includes("manual::classified") ? n.tags.filter((t) => !t.startsWith("auto::")) : n.tags; // manual classification wins over the classifier
-      const merged = existing ? { ...n, tags: [...new Set([...importTags, ...keepTags])] } : n;
+      const keepTags = existing.tags.filter((t) => t.startsWith("auto::") || t.startsWith("needs-review::") || t.startsWith("manual::") || t.startsWith("leech") || t.startsWith("anki::") || t === "ask-claude");
+      const importTags = existing.tags.includes("manual::classified") ? n.tags.filter((t) => !t.startsWith("auto::")) : n.tags;
+      const userEdited = (existing.edited ?? 0) > base;
+      const fields = userEdited ? existing.fields : n.fields;
+      const tags = [...new Set([...importTags, ...keepTags, ...(userEdited && n.fields.join("\x1f") !== existing.fields.join("\x1f") ? ["needs-review::anki-changed"] : [])])];
+      const changed = fields.join("\x1f") !== existing.fields.join("\x1f") || !sameTags(tags, existing.tags) || n.ntid !== existing.ntid;
+      // stamp(): the update must win the sync against older copies on other devices.
+      const merged = { ...existing, ntid: n.ntid, fields, tags, ankiMod: n.modified, modified: changed ? stamp() : existing.modified };
+      if (changed) updated++;
       this.notes.set(n.id, merged); notesOut.push(merged);
     }
     const knownReviewIds = new Set(this.reviews.map((r) => r.id));
     for (const c of res.cards) {
-      if ((this.tombstones["c:" + c.id] ?? -1) >= c.mod || (this.tombstones["n:" + c.nid] ?? -1) >= c.mod || !this.notes.has(c.nid)) continue;
+      if (this.tombstones["c:" + c.id] !== undefined || this.tombstones["n:" + c.nid] !== undefined || !this.notes.has(c.nid)) continue;
       const existing = this.cards.get(c.id);
-      if (!existing) { this.cards.set(c.id, c); cardsOut.push(c); newCards++; continue; }
+      if (!existing) { const to = mapDeck(c.source, this.settings.deckMap); const m = to ? { ...c, source: to } : c; this.cards.set(c.id, m); cardsOut.push(m); newCards++; if (to) organized++; continue; }
       // Whichever side has the more recent review keeps its scheduling state. Yuzu owns the category (source) once imported.
       if (c.lastReview > existing.lastReview) { const m = { ...c, flag: existing.flag, source: existing.source }; this.cards.set(c.id, m); cardsOut.push(m); }
     }
@@ -422,7 +445,7 @@ export class Store {
     await db.putMany("reviews", addedReviews, 5000, (f) => onProgress?.("Saving reviews", 0.8 + f * 0.2));
     await db.setMeta("lastImport", { at: Date.now(), summary: res.summary });
     this.bump(); this.touch();
-    return { newNotes, newCards, updated, reviews: addedReviews.length };
+    return { newNotes, newCards, updated, organized, reviews: addedReviews.length };
   }
 
   mediaUrl = (name: string): string | null => {
@@ -453,7 +476,7 @@ export class Store {
 
   /** Apply a curation file made by Claude: deck moves, note merges (keep one note, drop the copies, union tags) and tag additions. */
   async importCuration(json: unknown, onProgress?: (msg: string, frac: number) => void): Promise<string> {
-    const c = json as { yuzu_curation: 1; name?: string; decks?: Record<string, string | null>; merges?: { keep: string; drop: string[]; tags?: string[] }[]; review?: string[][]; tags?: Record<string, string[]> };
+    const c = json as { yuzu_curation: 1; name?: string; decks?: Record<string, string | null>; merges?: { keep: string; drop: string[]; tags?: string[] }[]; review?: string[][]; tags?: Record<string, string[]>; suspend?: string[] };
     if (!c || c.yuzu_curation !== 1) throw new Error("Not a Yuzu curation file");
     const now = stamp();
     const changedNotes = new Map<string, Note>(); const changedCards = new Map<string, Card>();
@@ -492,6 +515,12 @@ export class Store {
     onProgress?.("Tagging", 0.7);
     for (const [tag, ids] of Object.entries(c.tags ?? {})) for (const id of ids) { const n = this.notes.get(id); if (n && !n.tags.includes(tag)) { touchNote(id, (x) => x.tags.push(tag)); tagged++; } }
     for (const g of c.review ?? []) for (const id of g) { const n = this.notes.get(id); if (n && !n.tags.includes("needs-review::similar")) touchNote(id, (x) => x.tags.push("needs-review::similar")); }
+    // 4. suspend (e.g. notes the deck's author removed in Anki): history kept, reversible from the Library.
+    let suspended = 0;
+    for (const id of c.suspend ?? []) for (const card of byNid.get(id) ?? []) { const cur = changedCards.get(card.id) ?? this.cards.get(card.id); if (cur && !cur.suspended) { const m = { ...cur, suspended: true, mod: now }; this.cards.set(card.id, m); changedCards.set(card.id, m); suspended++; } }
+    // Remember where Anki decks belong, so later imports land new cards in the right category by themselves.
+    const learned = Object.fromEntries(Object.entries(decks).filter(([, v]) => typeof v === "string")) as Record<string, string>;
+    if (Object.keys(learned).length) await this.saveSettings({ deckMap: { ...this.settings.deckMap, ...learned } });
     onProgress?.("Saving", 0.85);
     await db.putMany("notes", [...changedNotes.values()]); await db.putMany("cards", [...changedCards.values()]);
     if (delNotes.length) await db.deleteMany("notes", delNotes); if (delCards.length) await db.deleteMany("cards", delCards);
@@ -499,7 +528,7 @@ export class Store {
     this.mergeLog = [...log.map((e, i) => ({ at: now + i, keep: e.keep, dropped: e.dropped, cards: e.cards, keepBefore: keepSnap.get(e.keep)!.note, keepCardsBefore: keepSnap.get(e.keep)!.cards })), ...this.mergeLog].slice(0, 1000);
     await db.setMeta("mergeLog2", this.mergeLog);
     this.bump(); this.touch();
-    return `${merged} duplicate groups merged (${dropped} notes removed), ${moved.toLocaleString()} cards moved to new categories, ${tagged.toLocaleString()} tags added${c.review?.length ? `, ${c.review.length} similar pairs tagged needs-review::similar` : ""}.`;
+    return `${merged} duplicate groups merged (${dropped} notes removed), ${moved.toLocaleString()} cards moved to new categories, ${tagged.toLocaleString()} tags added${c.review?.length ? `, ${c.review.length} similar pairs tagged needs-review::similar` : ""}${suspended ? `, ${suspended} cards suspended` : ""}.`;
   }
 
   // ---- hooks (personal notes on cards) --------------------------------------
@@ -1022,7 +1051,8 @@ export class Store {
   async updateNote(noteId: string, fields: string[], userTags: string[]) {
     const n = this.notes.get(noteId); if (!n) return;
     const auto = n.tags.filter((t) => t.startsWith("auto::"));
-    const next = { ...n, fields, tags: [...new Set([...userTags, ...auto])], modified: stamp() };
+    const t = stamp(); const fieldsChanged = fields.join("\x1f") !== n.fields.join("\x1f");
+    const next = { ...n, fields, tags: [...new Set([...userTags, ...auto])], modified: t, ...(fieldsChanged ? { edited: t } : {}) };
     this.notes.set(noteId, next); await this.persist("editing the card", db.putOne("notes", next)); this.bump(); this.touch();
   }
 

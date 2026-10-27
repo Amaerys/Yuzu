@@ -157,3 +157,11 @@ test("clock: edits are stamped after anything observed from another device, even
   assert.ok(stamp() > t, "strictly increasing");
   observe(Date.now() + 3 * 86400000); assert.ok(stamp() < Date.now() + 86400000, "implausible future times are ignored");
 });
+
+import { mapDeck } from "../src/lib/store.ts";
+test("deck map: exact, parent fallback keeps the rest, unmapped stays", () => {
+  const m = { "Rob's EM::12_Pediatrics": "Medicine::Specialties::EM::Rob's::12_Pediatrics", "AnKing Step Deck": "Medicine::Exams::Step 1::AnKing" };
+  assert.equal(mapDeck("Rob's EM::12_Pediatrics", m), "Medicine::Specialties::EM::Rob's::12_Pediatrics");
+  assert.equal(mapDeck("AnKing Step Deck::Cardio::New", m), "Medicine::Exams::Step 1::AnKing::Cardio::New");
+  assert.equal(mapDeck("Languages::German", m), null);
+});

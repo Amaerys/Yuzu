@@ -25,6 +25,10 @@ export interface Note {
   tags: string[];        // lowercase-insensitive, hierarchical with ::
   created: number;       // ms
   modified: number;      // ms
+  /** Anki's own modification time of the version last imported (ms). */
+  ankiMod?: number;
+  /** Last time the user edited the fields in Yuzu (ms). */
+  edited?: number;
 }
 
 export interface Card {

@@ -85,7 +85,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         onProgress: (m, f) => { setMsg(m); if (f !== undefined) setFrac(f); },
       }, { skipDeckPrefixes: skipLanguages ? ["Languages"] : [] });
       const merged = await store.applyImport(res, (m, f) => { setMsg(m); setFrac(f); });
-      setResult(`Imported ${res.summary.notes.toLocaleString()} notes, ${res.summary.cards.toLocaleString()} cards and ${res.summary.reviews.toLocaleString()} reviews (${merged.newCards.toLocaleString()} new cards, ${merged.updated} updated). ${res.summary.media ? `${res.summary.media.toLocaleString()} images and sounds referenced.` : ""}`);
+      setResult(`Imported ${res.summary.notes.toLocaleString()} notes, ${res.summary.cards.toLocaleString()} cards and ${res.summary.reviews.toLocaleString()} reviews (${merged.newCards.toLocaleString()} new cards${merged.organized ? `, ${merged.organized.toLocaleString()} placed in your categories` : ""}, ${merged.updated.toLocaleString()} notes updated from Anki). ${res.summary.media ? `${res.summary.media.toLocaleString()} images and sounds referenced.` : ""}`);
       // The same file may carry the media: continue straight into adding it.
       if (res.summary.media && await hasMedia(file)) { setBusy(false); await onMedia(file); }
     } catch (e: any) {
