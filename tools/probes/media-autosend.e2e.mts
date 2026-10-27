@@ -40,5 +40,15 @@ try {
   await addRefs(PC, 60, 100); await PC.evaluate(`(async () => { const d = await (await navigator.storage.getDirectory()).getDirectoryHandle("collection.media"); for (let i = 60; i < 100; i++) { const name = i % 5 === 4 ? "wort " + i + ".mp3" : "bild " + i + ".png"; await d.getFileHandle(name).catch(() => null); } })()`);
   console.log("\nNEW CARDS ->", await syncOf(PC)); console.log(" phone:", await syncOf(Phone), "·", await media(Phone)); console.log(" PC:", await syncOf(PC)); console.log(" phone:", await syncOf(Phone), "·", await media(Phone)); console.log(" phone:", await syncOf(Phone), "·", await media(Phone));
   const ok = await Phone.evaluate(`(async () => { const u = window.yuzu.mediaUrl("Bild 70.png"); const im = new Image(); im.src = u; await im.decode(); return im.naturalWidth + "x" + im.naturalHeight + " " + window.yuzu.media.get("wort 74.mp3")?.type; })()`); console.log(" phone renders Bild 70.png:", ok);
+  // the phone as master: a brand-new tablet (no Anki folder anywhere) gets its media from the phone
+  await PC.evaluate(() => (window as any).yuzu.unlinkAnkiFolder());
+  const Tab = await device("Tablet");
+  console.log("\nTABLET:", await syncOf(Tab), "·", await media(Tab)); console.log(" tablet:", await syncOf(Tab));
+  // new media the tablet wants that no one shared yet: make it so by giving the phone one extra file only it has
+  await Phone.evaluate(`(async () => { const st = window.yuzu; const n = [...st.notes.values()][150]; await st.updateNote(n.id, [n.fields[0] + ' <img src="only-on-phone.png">', ...n.fields.slice(1)], n.tags); const c = new OffscreenCanvas(300, 200); c.getContext("2d").fillRect(0, 0, 300, 200); await st.addMediaFrom([new File([await c.convertToBlob({ type: "image/png" })], "only-on-phone.png")], {}); })()`);
+  console.log(" phone:", await syncOf(Phone)); console.log(" tablet:", await syncOf(Tab)); console.log(" phone (serves):", await syncOf(Phone)); console.log(" tablet:", await syncOf(Tab), "·", await media(Tab));
+  console.log(" debug phone:", await Phone.evaluate(() => { const y = (window as any).yuzu; return JSON.stringify({ has: y.media.has("only-on-phone.png"), wants: Object.values(y.mediaWants).map((w: any) => [w.device, w.total, w.missing.slice(0, 3)]), note: y.sendNote }); }));
+  console.log(" debug tablet:", await Tab.evaluate(() => { const y = (window as any).yuzu; return JSON.stringify({ wants: Object.values(y.mediaWants).map((w: any) => [w.device, w.total, w.missing.slice(0, 3)]) }); }));
+  console.log(" tablet has only-on-phone.png:", await Tab.evaluate(() => (window as any).yuzu.media.has("only-on-phone.png")));
   console.log("repo files:", Object.keys(gh.files()).filter((p) => p.startsWith("wants/") || p.startsWith("media/")).length);
 } finally { console.log("errors:", errors.length ? errors : "none"); await browser.close(); server.kill(); }

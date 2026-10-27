@@ -223,16 +223,17 @@ export class Store {
           }
         }
         // Media wants: each device says which files its cards use that it lacks; a PC with Anki's folder linked sends them.
-        const me = this.settings.deviceName || "this device";
+        const me = await this.deviceId(); const myName = this.settings.deviceName || "Another device";
         const wants: Record<string, MediaWant> = { ...(await db.getMeta<Record<string, MediaWant>>("mediaWants", {})), ...(got?.mediaWants ?? {}) };
-        for (const [k, w] of Object.entries(wants)) if (Date.now() - w.at > 60 * 86400000 && k !== me) delete wants[k];
+        for (const [k, w] of Object.entries(wants)) if (!w.id || (Date.now() - w.at > 60 * 86400000 && k !== me)) delete wants[k]; // (lists from the first version had no id)
         const dir = await this.ankiFolder();
         if (this.settings.mediaDownload && !dir) {
           const miss: string[] = []; let total = 0;
           for (const r of this.mediaRefs()) if (!this.media.has(r) && !mediaIndex[r] && !/\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(r)) { total++; if (miss.length < 20000) miss.push(r); }
-          const prev = wants[me]; if (!prev || prev.total !== total) wants[me] = { device: me, at: Date.now(), total, missing: miss };
+          const prev = wants[me]; if (!prev || prev.total !== total || prev.device !== myName) wants[me] = { id: me, device: myName, at: Date.now(), total, missing: miss };
         } else delete wants[me];
-        if (dir) { const more = await this.sendWanted(dir, wants, me, mediaIndex, mediaBlobs, progress); mediaIndex = more.index; if (more.left) this.scheduleSync(4000); }
+        // Senders: Anki's folder (PC, linked) or this device's own library (the phone as the master copy).
+        if (dir || this.media.size) { const more = await this.sendWanted(dir, wants, me, mediaIndex, mediaBlobs, progress); mediaIndex = more.index; if (more.left) this.scheduleSync(4000); }
         this.mediaWants = wants;
         progress("Preparing upload");
         if (!this.shardCache.size) { const saved = await db.getMeta<[string, { fp: string; hash: string }][]>("shardCache", []); for (const [k, v] of saved) this.shardCache.set(k, v); }
@@ -675,10 +676,13 @@ export class Store {
   async unlinkAnkiFolder() { await this.linkAnkiFolder(null); }
   /** After a browser restart Chrome may ask again; this must run from a tap. */
   async allowAnkiFolder() { const h = this.ankiDir ?? (await db.getMeta<any>("ankiDir", null)); if (!h) return false; const p = await h.requestPermission?.({ mode: "read" }); this.ankiDir = h; this.ankiDirAccess = p === "granted" ? "granted" : "prompt"; this.bump(); if (p === "granted") this.scheduleSync(1000); return p === "granted"; }
-  async loadAnkiFolderState() { if (this.ankiDir === undefined) { this.ankiDir = await db.getMeta<any>("ankiDir", null); this.mediaWants = await db.getMeta<Record<string, MediaWant>>("mediaWants", {}); } const h = this.ankiDir; this.ankiDirName = h?.name ?? ""; if (!h) { this.ankiDirAccess = "none"; return; } try { this.ankiDirAccess = (await h.queryPermission?.({ mode: "read" })) === "granted" ? "granted" : "prompt"; } catch { this.ankiDirAccess = "prompt"; } }
+  async loadAnkiFolderState() { await this.deviceId(); if (this.ankiDir === undefined) { this.ankiDir = await db.getMeta<any>("ankiDir", null); this.mediaWants = await db.getMeta<Record<string, MediaWant>>("mediaWants", {}); } const h = this.ankiDir; this.ankiDirName = h?.name ?? ""; if (!h) { this.ankiDirAccess = "none"; return; } try { this.ankiDirAccess = (await h.queryPermission?.({ mode: "read" })) === "granted" ? "granted" : "prompt"; } catch { this.ankiDirAccess = "prompt"; } }
   private async ankiFolder(): Promise<any | null> { await this.loadAnkiFolderState(); return this.ankiDirAccess === "granted" ? this.ankiDir : null; }
   /** Other devices' missing media, as the sender sees it. */
-  otherWants(): MediaWant[] { const me = this.settings.deviceName || "this device"; return Object.values(this.mediaWants).filter((w) => w.device !== me); }
+  otherWants(): MediaWant[] { const me = this.myId; return Object.entries(this.mediaWants).filter(([k]) => k !== me).map(([, w]) => w); }
+  private myId = "";
+  /** A random id for this browser (kept in its database), so devices with the same or no name never mix up. */
+  async deviceId(): Promise<string> { if (this.myId) return this.myId; let id = await db.getMeta<string>("deviceId", ""); if (!id) { id = Math.random().toString(36).slice(2, 10) + Date.now().toString(36); await db.setMeta("deviceId", id); } this.myId = id; return id; }
   private async ankiFile(dir: any, name: string): Promise<File | null> {
     try { return await (await dir.getFileHandle(name)).getFile(); } catch { /* not under that exact name */ }
     if (!this.ankiList) { const m = new Map<string, string>(); for await (const [n, h] of dir.entries()) if (h.kind === "file") m.set(n, n); this.ankiList = forgiving(m); }
@@ -686,20 +690,26 @@ export class Store {
     try { return await (await dir.getFileHandle(real)).getFile(); } catch { return null; }
   }
   /** Read what the other devices lack from Anki's folder, shrink pictures, and queue them for this sync (bounded per sync). */
-  private async sendWanted(dir: any, wants: Record<string, MediaWant>, me: string, index: MediaIndex, out: { path: string; bytes: Uint8Array }[], progress: (m: string) => void): Promise<{ index: MediaIndex; left: number }> {
+  private async sendWanted(dir: any | null, wants: Record<string, MediaWant>, me: string, index: MediaIndex, out: { path: string; bytes: Uint8Array }[], progress: (m: string) => void): Promise<{ index: MediaIndex; left: number }> {
     const need = new Set<string>(); let biggest: MediaWant | null = null;
-    for (const w of Object.values(wants)) { if (w.device === me) continue; if (w.total > 4000) { if (!biggest || w.total > biggest.total) biggest = w; continue; } for (const n of w.missing) if (!index[n]) need.add(n); }
-    this.sendNote = biggest ? `${biggest.device} is missing ${biggest.total.toLocaleString()} files — too many for sync. Make a phone media file once (above); after that new media goes automatically.` : "";
+    for (const [k, w] of Object.entries(wants)) { if (k === me) continue; if (w.total > 4000) { if (!biggest || w.total > biggest.total) biggest = w; continue; } for (const n of w.missing) if (!index[n] && (dir || this.media.has(n))) need.add(n); }
+    this.sendNote = biggest ? `${biggest.device} is missing ${biggest.total.toLocaleString()} files — too many for sync. ${dir ? "Make a phone media file once (above)" : "Press “Save media file” here and choose it there once"}; after that new media goes automatically.` : "";
     let budget = MEDIA_BATCH_BYTES - out.reduce((a, b) => a + b.bytes.length, 0); let sent = 0, notFound = 0; const list = [...need];
     for (const name of list) {
       if (budget <= 0) break;
-      const f = await this.ankiFile(dir, name); if (!f) { notFound++; index = { ...index, [name]: { p: "", s: 0 } }; continue; } // not in Anki either: don't ask again
-      if (f.size > 20 * 1048576) { notFound++; index = { ...index, [name]: { p: "", s: 0 } }; continue; } // too big for sync
       let blob: Blob;
-      try { const bytes = new Uint8Array(await f.arrayBuffer()); blob = IMG.test(name) ? await shrinkImage(bytes, name) : new Blob([bytes as BlobPart], { type: mimeFor(name) }); }
-      catch { notFound++; continue; }
+      const own = this.media.get(name);
+      if (own) { blob = own; } // already phone-sized: send as stored
+      else {
+        const f = dir ? await this.ankiFile(dir, name) : null; if (!f) { notFound++; if (dir) index = { ...index, [name]: { p: "", s: 0 } }; continue; } // not in Anki either: don't ask again
+        if (f.size > 20 * 1048576) { notFound++; index = { ...index, [name]: { p: "", s: 0 } }; continue; } // too big for sync
+        try { const bytes = new Uint8Array(await f.arrayBuffer()); blob = IMG.test(name) ? await shrinkImage(bytes, name) : new Blob([bytes as BlobPart], { type: mimeFor(name) }); }
+        catch { notFound++; continue; }
+      }
+      if (blob.size > 20 * 1048576) { notFound++; continue; }
       const ext = blob.type === "image/webp" ? "webp" : (name.split(".").pop() || "bin").toLowerCase();
-      const path = `media/${hashName(name)}.${ext}`; const data = new Uint8Array(await blob.arrayBuffer());
+      let data: Uint8Array; try { data = new Uint8Array(await blob.arrayBuffer()); } catch { notFound++; continue; }
+      const path = `media/${hashName(name)}.${ext}`;
       out.push({ path, bytes: data }); index = { ...index, [name]: { p: path, s: data.length } }; budget -= data.length; sent++;
       if (sent % 10 === 0) progress(`Sending media to your other devices · ${sent}`);
     }
