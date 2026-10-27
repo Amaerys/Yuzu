@@ -87,24 +87,41 @@ export async function shrinkImage(data: Uint8Array, name: string, maxPx = 1200):
 /** A place media files can be read from by name. */
 interface Source { kind: "anki" | "yuzu" | "folder"; has(name: string): boolean; read(name: string): Promise<Uint8Array | Blob | null>; names(): Iterable<string> }
 
+/**
+ * Find a file the way Anki effectively does: exact name first, then the same name in another Unicode form
+ * (Mac vs Windows), with different capital letters (Windows/macOS ignore case, so "ECG.PNG" works in Anki
+ * while the file is "ecg.png"), %-encoded, or with stray spaces. Cards keep their own spelling.
+ */
+export function forgiving<T>(m: Map<string, T>): (n: string) => T | undefined {
+  let loose: Map<string, T> | null = null;
+  const key = (n: string) => { let k = n.trim(); try { if (/%[0-9a-f]{2}/i.test(k)) k = decodeURIComponent(k); } catch { /* not encoded */ } return k.normalize("NFC").toLowerCase(); };
+  return (n) => {
+    const hit = m.get(n) ?? m.get(n.normalize("NFC")) ?? m.get(n.normalize("NFD")); if (hit !== undefined) return hit;
+    if (!loose) { loose = new Map(); for (const [k, v] of m) { const l = key(k); if (!loose.has(l)) loose.set(l, v); } }
+    return loose.get(key(n));
+  };
+}
+
 async function zipSource(file: Blob, env: MediaEnv): Promise<Source> {
   const zip = new ZipFile(file, env.inflateRaw);
   const list = await zip.list();
   const byName = new Map(list.map((e) => [e.name, e] as [string, ZipEntry]));
   if (byName.has(YUZU_MEDIA_MARK)) {
     const files = new Map<string, ZipEntry>(); for (const e of list) if (e.name.startsWith("m/")) files.set(e.name.slice(2), e);
-    return { kind: "yuzu", has: (n) => files.has(n), names: () => files.keys(), read: async (n) => { const e = files.get(n); return e ? zip.read(e) : null; } };
+    const find = forgiving(files);
+    return { kind: "yuzu", has: (n) => find(n) !== undefined, names: () => files.keys(), read: async (n) => { const e = find(n); return e ? zip.read(e) : null; } };
   }
-  const { map, modern } = await readMediaMap(zip, env);
+  const { map, modern } = await readMediaMap(zip, env); const find = forgiving(map);
   return {
-    kind: "anki", has: (n) => map.has(n), names: () => map.keys(),
-    read: async (n) => { const k = map.get(n); const e = k !== undefined ? byName.get(k) : undefined; if (!e) return null; let d = await zip.read(e); if (modern) d = await env.zstd!(d); return d; },
+    kind: "anki", has: (n) => find(n) !== undefined, names: () => map.keys(),
+    read: async (n) => { const k = find(n); const e = k !== undefined ? byName.get(k) : undefined; if (!e) return null; let d = await zip.read(e); if (modern) d = await env.zstd!(d); return d; },
   };
 }
 
 function folderSource(files: Iterable<File>): Source {
   const byName = new Map<string, File>(); for (const f of files) byName.set(f.name.normalize("NFC"), f);
-  return { kind: "folder", has: (n) => byName.has(n.normalize("NFC")), names: () => byName.keys(), read: async (n) => byName.get(n.normalize("NFC")) ?? null };
+  const find = forgiving(byName);
+  return { kind: "folder", has: (n) => find(n) !== undefined, names: () => byName.keys(), read: async (n) => find(n) ?? null };
 }
 
 const sec = (ms: number) => { const s = Math.round(ms / 1000); return s < 90 ? `${s} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`; };

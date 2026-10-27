@@ -36,11 +36,15 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
   }
   async function hasMedia(file: Blob) { try { const z = new ZipFile(file, inflateRaw); const l = await z.list(); return l.length > 3 && l.some((e) => e.name === "media"); } catch { return false; } }
   async function onExportMedia() {
-    setBusy(true); setMediaBusy(true); setMediaMsg("Packing"); setMediaFrac(0);
+    // On a PC (Chrome/Edge) pick a folder once and every part is written straight into it — no giant downloads.
+    let dir: any = null; const pick = (window as any).showDirectoryPicker;
+    if (pick) { try { dir = await pick({ id: "yuzu-media", mode: "readwrite", startIn: "downloads" }); } catch (e: any) { if (e?.name === "AbortError") return; dir = null; } }
+    setBusy(true); setMediaBusy(true); setMediaMsg(dir ? `Saving into “${dir.name}”` : "Packing"); setMediaFrac(0);
     try {
-      const files = await holdAwake(() => store.exportMedia((m) => setMediaMsg(m)));
-      for (const f of files) { const a = document.createElement("a"); a.href = URL.createObjectURL(f.blob); a.download = f.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000); }
-      setMediaMsg(files.length ? `Saved ${files.map((f) => `${f.name} (${(f.blob.size / 1048576).toFixed(0)} MB)`).join(", ")}. On the other device choose ${files.length > 1 ? "each file" : "it"} with “Choose file”.` : "No media on this device yet.");
+      const { files, skipped } = await holdAwake(() => store.exportMedia((m) => setMediaMsg(m), dir));
+      if (!dir) for (const f of files) { const a = document.createElement("a"); a.href = URL.createObjectURL(f.blob!); a.download = f.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000); }
+      const list = files.map((f) => `${f.name} (${(f.size / 1048576).toFixed(0)} MB)`).join(", ");
+      setMediaMsg(files.length ? `Saved ${list}${dir ? ` in “${dir.name}”` : ""}. On the other device choose ${files.length > 1 ? "each file" : "it"} with “Choose file”.` + (skipped.length ? ` ${skipped.length.toLocaleString()} file${skipped.length === 1 ? "" : "s"} couldn't be read on this device and ${skipped.length === 1 ? "was" : "were"} left out — add them again with “Choose media folder”.` : "") : "No media on this device yet.");
     } catch (e: any) { setMediaMsg("Failed: " + (e?.message ?? e)); }
     finally { setBusy(false); setMediaBusy(false); }
   }
@@ -201,7 +205,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
             <button className="btn grow" disabled={busy || !mediaStat.stored} onClick={onExportMedia}>Save media file</button>
             <button className="btn" disabled={busy || !mediaStat.bytes} onClick={async () => { if (confirm("Remove all deck images and sounds from this device? Cards keep working; media shows as placeholders until added again.")) { setMediaMsg(`Removed ${(await store.clearMedia()).toLocaleString()} files.`); } }}>Remove</button>
           </div>
-          {mediaStat.missing.length > 0 && <details className="how"><summary className="small">Show what's missing</summary><p className="small muted" style={{ wordBreak: "break-all" }}>{mediaStat.missing.slice(0, 60).join(" · ")}{mediaStat.total - mediaStat.stored > 60 ? " …" : ""}</p></details>}
+          {mediaStat.missing.length > 0 && <MissingMedia key={mediaStat.stored} />}
         </>)}
         <div className="field" style={{ marginTop: 12 }}><label>Hidden fields <span className="muted">(never shown, their pictures never kept)</span></label>
           <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
@@ -290,5 +294,30 @@ function Diagnostics() {
       {info.lastError && <div className="muted" style={{ marginTop: 6 }}>Last error ({fmtDateTime(info.lastError.at)}, {info.lastError.where}): {info.lastError.message}</div>}
       <button className="btn block" style={{ marginTop: 10 }} onClick={repairApp}>Repair app (reload the latest version, keep data)</button>
     </div>
+  );
+}
+
+/** The full list of files the cards use that this device doesn't have, by deck, with a CSV to check against Anki. */
+function MissingMedia() {
+  const [list, setList] = useState<ReturnType<typeof store.missingMedia> | null>(null);
+  const byDeck = useMemo(() => { const m = new Map<string, NonNullable<typeof list>>(); for (const x of list ?? []) { const k = x.deck.split("::").slice(0, 4).join(" › ") || "(no deck)"; m.set(k, [...(m.get(k) ?? []), x]); } return [...m].sort((a, b) => b[1].length - a[1].length); }, [list]);
+  function saveCsv() {
+    const q = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`;
+    const rows = [["file", "type", "notes using it", "deck", "example card text", "note id"].map(q).join(","), ...(list ?? []).map((x) => [x.name, x.kind, x.notes, x.deck, x.example, x.noteId].map(q).join(","))];
+    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob(["\ufeff" + rows.join("\r\n")], { type: "text/csv" }));
+    a.download = `yuzu-missing-media-${new Date().toISOString().slice(0, 10).split("-").reverse().join("-")}.csv`; document.body.appendChild(a); a.click(); a.remove();
+  }
+  return (
+    <details className="how" onToggle={(e) => { if ((e.target as HTMLDetailsElement).open && !list) setList(store.missingMedia()); }}>
+      <summary className="small">Show what's missing</summary>
+      {!list ? <p className="small muted">Looking…</p> : (<>
+        <p className="small muted">{list.length.toLocaleString()} files ({list.filter((x) => x.kind === "image").length.toLocaleString()} images, {list.filter((x) => x.kind === "sound").length.toLocaleString()} sounds, {list.filter((x) => x.kind === "other").length.toLocaleString()} other). If Anki's <b>Tools → Check Media</b> lists the same names under “Missing”, they are missing in Anki too and nothing on this device can fix them.</p>
+        <button className="btn" onClick={saveCsv}>Save the list (CSV)</button>
+        {byDeck.map(([deck, xs]) => (
+          <details key={deck} className="how" style={{ marginTop: 6 }}><summary className="small"><b>{xs.length}</b> · {deck}</summary>
+            <ul className="small muted" style={{ wordBreak: "break-all" }}>{xs.slice(0, 150).map((x) => <li key={x.name}><b>{x.name}</b>{x.example ? <> — “{x.example}”</> : null}{x.notes > 1 ? ` (${x.notes} notes)` : ""}</li>)}{xs.length > 150 ? <li>… {xs.length - 150} more in the CSV</li> : null}</ul>
+          </details>))}
+      </>)}
+    </details>
   );
 }

@@ -9,7 +9,7 @@ import { noteTitle } from "./render";
 import { stamp, observe } from "./clock";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, type MediaEnv } from "../import/media";
-import { writeZip } from "./zipwrite";
+import { writeZip, streamZip } from "./zipwrite";
 import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
 export interface Settings {
@@ -651,6 +651,19 @@ export class Store {
     }
     return { total, stored, bytes, images, sounds, missing };
   }
+  /** Every file the cards use that isn't on this device, with where it is used (for the missing list / CSV). */
+  missingMedia(): { name: string; kind: "image" | "sound" | "other"; notes: number; deck: string; example: string; noteId: string }[] {
+    const have = (n: string) => this.media.has(n); const out = new Map<string, { name: string; kind: "image" | "sound" | "other"; notes: number; deck: string; example: string; noteId: string }>();
+    const deckOf = new Map<string, string>(); for (const c of this.cards.values()) if (!deckOf.has(c.nid)) deckOf.set(c.nid, c.source);
+    const skip = this.skipHidden(); const kind = (n: string) => (IMG.test(n) ? "image" : AUDIO.test(n) ? "sound" : "other") as "image" | "sound" | "other";
+    const text = (h: string) => h.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim().slice(0, 90);
+    for (const n of this.notes.values()) for (const r of mediaRefs([n], [], skip)) {
+      if (have(r)) continue; const m = out.get(r);
+      if (m) m.notes++; else out.set(r, { name: r, kind: kind(r), notes: 1, deck: deckOf.get(n.id) ?? "", example: text(n.fields.find((f) => text(f)) ?? ""), noteId: n.id });
+    }
+    for (const nt of this.notetypes.values()) for (const r of mediaRefs([], [nt])) if (!have(r) && !out.has(r)) out.set(r, { name: r, kind: kind(r), notes: 0, deck: `Note type “${nt.name}” (template file)`, example: "", noteId: "" });
+    return [...out.values()].sort((a, b) => a.deck.localeCompare(b.deck) || a.name.localeCompare(b.name));
+  }
   /** Add media from an Anki export with media, a Yuzu media file, or files picked from Anki's media folder. Stopping keeps what is stored; running it again resumes. */
   async addMediaFrom(input: Blob | File[], env: MediaEnv) {
     const batch: { name: string; blob: Blob }[] = [];
@@ -661,21 +674,41 @@ export class Store {
     } finally { await flush(); this.mediaUrls.clear(); this.bump(); }
   }
   /** This device's media (already shrunk) as one or more Yuzu media files, to carry to another device. */
-  async exportMedia(onProgress?: (msg: string) => void): Promise<{ name: string; blob: Blob }[]> {
+  /**
+   * Pack this device's media into Yuzu media files (split at 1.8 GB / 60k files).
+   * With `dir` (a folder picked on a PC) each part is streamed straight to disk; otherwise Blobs are returned
+   * for download. A file that can't be read is re-read from the database and skipped if that fails too.
+   */
+  async exportMedia(onProgress?: (msg: string) => void, dir?: any): Promise<{ files: { name: string; blob?: Blob; size: number }[]; skipped: string[] }> {
     const refs = this.mediaRefs();
     const all = [...this.media].filter(([n]) => refs.has(n) || n.startsWith("pack-"));
-    const out: { name: string; blob: Blob }[] = []; const PART = 1800 * 1048576, MAX = 60000;
-    let group: [string, Blob][] = [], size = 0, done = 0;
+    const out: { name: string; blob?: Blob; size: number }[] = []; const skipped: string[] = []; const PART = 1800 * 1048576, MAX = 60000;
+    const groups: [string, Blob][][] = []; let group: [string, Blob][] = [], size = 0;
+    for (const [n, b] of all) { if (group.length && (size + b.size > PART || group.length >= MAX)) { groups.push(group); group = []; size = 0; } group.push([n, b]); size += b.size; }
+    if (group.length) groups.push(group);
     const stampDate = new Date().toISOString().slice(0, 10).split("-").reverse().join("-");
-    const close = async () => {
-      if (!group.length) return;
-      const mark = new TextEncoder().encode(JSON.stringify({ yuzu_media: 1, files: group.length, at: Date.now() }));
-      const blob = await writeZip([{ name: YUZU_MEDIA_MARK, data: mark }, ...group.map(([name, b]) => ({ name: "m/" + name, data: b }))], () => { if (++done % 200 === 0) onProgress?.(`Packing ${done.toLocaleString()} of ${all.length.toLocaleString()} files`); });
-      out.push({ name: `yuzu-media-${stampDate}${out.length || all.length > group.length ? "-" + (out.length + 1) : ""}.zip`, blob }); group = []; size = 0;
+    const reread = async (zipName: string) => {
+      const name = zipName.slice(2); const row = await db.getOne<{ name: string; blob: Blob }>("media", name);
+      if (row?.blob) this.media.set(name, row.blob);
+      return row?.blob;
     };
-    for (const [n, b] of all) { if (group.length && (size + b.size > PART || group.length >= MAX)) await close(); group.push([n, b]); size += b.size; }
-    await close();
-    return out;
+    let done = 0;
+    for (let g = 0; g < groups.length; g++) {
+      const grp = groups[g]; const name = `yuzu-media-${stampDate}${groups.length > 1 ? "-" + (g + 1) : ""}.zip`;
+      const mark = new TextEncoder().encode(JSON.stringify({ yuzu_media: 1, files: grp.length, at: Date.now() }));
+      const files = [{ name: YUZU_MEDIA_MARK, data: mark }, ...grp.map(([n, b]) => ({ name: "m/" + n, data: b }))];
+      const opts = { reread, skipped, onFile: () => { if (++done % 200 === 0) onProgress?.(`Packing ${done.toLocaleString()} of ${(all.length + groups.length).toLocaleString()} files${groups.length > 1 ? ` · part ${g + 1} of ${groups.length}` : ""}`); } };
+      if (dir) {
+        const fh = await dir.getFileHandle(name, { create: true }); const w = await fh.createWritable();
+        let bytes = 0; const sink = { write: async (c: Uint8Array | Blob) => { bytes += c instanceof Blob ? c.size : c.length; await w.write(c); } };
+        try { await streamZip(files, sink, opts); await w.close(); } catch (e) { try { await w.abort(); } catch { /* already closed */ } throw e; }
+        out.push({ name, size: bytes });
+      } else {
+        const blob = await writeZip(files, opts); out.push({ name, blob, size: blob.size });
+      }
+    }
+    if (skipped.length) { const names = skipped.map((z) => z.slice(2)); for (const n of names) this.media.delete(n); await db.deleteMany("media", names); this.mediaUrls.clear(); this.bump(); }
+    return { files: out, skipped };
   }
   async clearMedia(keepPacks = true) {
     const del: string[] = []; for (const name of this.media.keys()) if (!(keepPacks && name.startsWith("pack-"))) { del.push(name); this.media.delete(name); }

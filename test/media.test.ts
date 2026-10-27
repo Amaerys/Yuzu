@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import zlib from "node:zlib";
 import { importMedia, imageRefs, mediaRefs, readMediaMap, YUZU_MEDIA_MARK } from "../src/import/media.ts";
-import { writeZip } from "../src/lib/zipwrite.ts";
+import { writeZip, streamZip } from "../src/lib/zipwrite.ts";
 import { rewriteMedia, rewriteCssUrls } from "../src/lib/render.ts";
 import { ZipFile } from "../src/lib/zipfile.ts";
 
@@ -98,4 +98,21 @@ test("hidden fields: Sketchy content is not rendered and its pictures are not wa
   assert.deepEqual([...refs].sort(), ["keep.png"]);
   setHiddenFields([]);
   assert.match(renderCard({ note: note as any, notetype: nt as any, ord: 0 }).back, /sk1\.jpg/);
+});
+
+test("media: an unreadable stored file is re-read, then skipped — the save still finishes (blob and stream)", async () => {
+  const bad = { size: 3, type: "", arrayBuffer: async () => { throw new DOMException("The requested file could not be read", "NotReadableError"); } } as unknown as Blob;
+  const files = [{ name: YUZU_MEDIA_MARK, data: new TextEncoder().encode("{}") }, { name: "m/ecg 1.png", data: bad }, { name: "m/a.mp3", data: bad }, { name: "m/Ärger ß.png", data: new Blob([png]) }];
+  const skipped: string[] = [];
+  const reread = async (n: string) => (n === "m/ecg 1.png" ? new Blob([png]) : null);
+  const blob = await writeZip(files, { reread, skipped });
+  assert.deepEqual(skipped, ["m/a.mp3"]);
+  const ns = [...notes, { id: "n2", ntid: "t", guid: "g2", fields: ['<img src="Ärger ß.png">'], tags: [], created: 0, modified: 0 }];
+  const got: string[] = []; const r = await importMedia(blob, ns, () => false, async (n) => { got.push(n); }, env);
+  assert.deepEqual(got.sort(), ["ecg 1.png", "Ärger ß.png"].sort()); assert.ok(!got.includes("a.mp3"));
+  // streamed to "disk": same bytes as the Blob version
+  const chunks: BlobPart[] = []; const sk2: string[] = [];
+  const n = await streamZip(files, { write: async (c) => { chunks.push(c as BlobPart); } }, { reread, skipped: sk2 });
+  assert.equal(n, 3); assert.deepEqual(sk2, ["m/a.mp3"]);
+  assert.deepEqual(new Uint8Array(await new Blob(chunks).arrayBuffer()), new Uint8Array(await blob.arrayBuffer()));
 });
