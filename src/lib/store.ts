@@ -675,7 +675,7 @@ export class Store {
       if (!batch.length) return; const items = batch.splice(0); await db.putMany("media", items);
       for (const { name } of items) {
         let ok = false;
-        try { const row = await db.getOne<{ name: string; blob: Blob }>("media", name); if (row?.blob) { await row.blob.slice(0, 64).arrayBuffer(); this.media.set(name, row.blob); ok = true; } } catch { /* not readable */ }
+        try { const row = await db.getOne<{ name: string; blob: Blob }>("media", name); if (row?.blob) { await row.blob.arrayBuffer(); this.media.set(name, row.blob); ok = true; } } catch { /* not readable */ }
         if (!ok) { unreadable++; this.media.delete(name); try { await db.deleteMany("media", [name]); } catch { /* best effort */ } }
       }
     };
@@ -685,13 +685,13 @@ export class Store {
       await flush(); r.stored -= unreadable; r.failed += unreadable; return r;
     } finally { await flush(); this.mediaUrls.clear(); this.bump(); }
   }
-  /** Read every stored file once (a few bytes each) and report the ones the browser can no longer read. Deletes nothing. */
+  /** Read every stored file once, in full, and report the ones the browser can no longer read. Deletes nothing. */
   async checkMedia(onProgress?: (msg: string) => void): Promise<{ checked: number; unreadable: string[]; errors: Record<string, number> }> {
     const unreadable: string[] = []; const errors: Record<string, number> = {}; let checked = 0; const names = [...this.media.keys()];
     for (const name of names) {
-      try { await this.media.get(name)!.slice(0, 64).arrayBuffer(); }
+      try { await this.media.get(name)!.arrayBuffer(); }
       catch {
-        try { const row = await db.getOne<{ name: string; blob: Blob }>("media", name); if (!row?.blob) throw new Error("NotInDatabase"); await row.blob.slice(0, 64).arrayBuffer(); this.media.set(name, row.blob); }
+        try { const row = await db.getOne<{ name: string; blob: Blob }>("media", name); if (!row?.blob) throw new Error("NotInDatabase"); await row.blob.arrayBuffer(); this.media.set(name, row.blob); }
         catch (e: any) { unreadable.push(name); const k = e?.name || e?.message || "Error"; errors[k] = (errors[k] ?? 0) + 1; }
       }
       if (++checked % 500 === 0) onProgress?.(`Checked ${checked.toLocaleString()} of ${names.length.toLocaleString()}${unreadable.length ? ` · ${unreadable.length.toLocaleString()} unreadable` : ""}`);
@@ -728,10 +728,13 @@ export class Store {
       if (dir) {
         const fh = await dir.getFileHandle(name, { create: true }); const w = await fh.createWritable();
         let bytes = 0; const sink = { write: async (c: Uint8Array | Blob) => { bytes += c instanceof Blob ? c.size : c.length; await w.write(c); } };
-        try { await streamZip(files, sink, opts); await w.close(); } catch (e) { try { await w.abort(); } catch { /* already closed */ } throw e; }
+        let n = 0;
+        try { n = await streamZip(files, sink, opts); await w.close(); } catch (e) { try { await w.abort(); } catch { /* already closed */ } throw e; }
+        if (n <= 1) { try { await dir.removeEntry(name); } catch { /* leave it */ } continue; } // nothing readable in this part
         out.push({ name, size: bytes });
       } else {
-        const blob = await writeZip(files, opts); out.push({ name, blob, size: blob.size });
+        const before = skipped.length; const blob = await writeZip(files, opts);
+        if (skipped.length - before < grp.length) out.push({ name, blob, size: blob.size }); // skip a part with nothing readable
       }
     }
     // Nothing is deleted here: a file that can't be read is only left out of the media file and reported.
