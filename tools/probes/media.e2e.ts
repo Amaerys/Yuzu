@@ -4,7 +4,7 @@ await new Promise((r) => setTimeout(r, 800));
 const browser = await chromium.launch(); const page = await (await browser.newContext({ viewport: { width: 420, height: 860 } })).newPage();
 const errors: string[] = []; page.on("pageerror", (e) => errors.push(e.message));
 try {
-  await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2500); await page.click("nav.tabs >> text=Settings"); await page.waitForTimeout(500);
+  await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2500); await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await page.waitForTimeout(500);
   await page.locator('input[type=file]').first().setInputFiles("test/fixtures/medicine-legacy.apkg");
   await page.waitForFunction(() => /Imported/.test(document.body.innerText), null, { timeout: 120000 });
   console.log("before:", await page.evaluate(() => document.body.innerText.match(/[\d,]+ of [\d,]+ images[^.]*\./)?.[0]));
@@ -20,6 +20,6 @@ try {
   const n = await page.locator(".list-row").count(); console.log("rows for search:", n);
   if (n) { await page.locator(".list-row").first().click(); await page.waitForTimeout(800);
     console.log("preview img:", await page.evaluate(() => { const host = document.querySelector(".sheet .card-host") as any; const img = host?.shadowRoot?.querySelector("img"); return img ? `${img.src.slice(0, 5)} ${img.naturalWidth}x${img.naturalHeight} missing=${img.classList.contains("missing-media")}` : "none"; })); }
-  await page.reload(); await page.waitForTimeout(2500); await page.click("nav.tabs >> text=Settings"); await page.waitForTimeout(300);
+  await page.reload(); await page.waitForTimeout(2500); await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await page.waitForTimeout(300);
   console.log("after reload:", await page.evaluate(() => document.body.innerText.match(/[\d,]+ of [\d,]+ images[^.]*\./)?.[0]));
 } finally { console.log("errors:", errors.length ? errors : "none"); await browser.close(); server.kill(); }

@@ -32,8 +32,7 @@ function Calibration() {
 export function Progress({ onBoss }: { onBoss?: (path: string, view: "systems", name: string) => void }) {
   const v = store.getVersion();
   const d = useMemo(() => derive(), [v]);
-  const { stats, counts, perDay, maxD, retention, systems, mastery, cats, now } = d;
-  return <ProgressView {...{ stats, counts, perDay, maxD, retention, systems, mastery, cats, now, onBoss }} />;
+  return <ProgressView {...d} onBoss={onBoss} />;
 }
 
 function derive() {
@@ -53,14 +52,17 @@ function derive() {
   let ok = 0, all = 0;
   for (const r of store.reviews) if (r.ts > now - 30 * DAY && r.state === "review") { all++; if (r.rating > 1) ok++; }
   const retention = all ? Math.round((ok / all) * 100) : null;
+  // This week vs last week: reviews, minutes, recall.
+  const wk = (from: number, to: number) => { let n = 0, ms = 0, okk = 0, rv = 0; for (const r of store.reviews) if (r.ts >= from && r.ts < to) { n++; ms += Math.min(r.durationMs || 0, 120000); if (r.state === "review") { rv++; if (r.rating > 1) okk++; } } return { n, mins: Math.round(ms / 60000), recall: rv ? Math.round((okk / rv) * 100) : null }; };
+  const week = wk(now - 7 * DAY, now + 1), lastWeek = wk(now - 14 * DAY, now - 7 * DAY);
   const mastery = store.masteryBySystem(now);
   const systems = [...mastery].map(([name, m]) => ({ name, total: m.total, learned: m.total - m.unseen })).sort((a, b) => b.learned - a.learned || b.total - a.total);
   const tree = store.tree();
   const cats = tree.children.map((c) => ({ name: c.name, total: c.total, learned: c.reviewed, pct: c.total ? Math.round((c.reviewed / c.total) * 100) : 0 })).sort((a, b) => b.learned - a.learned);
-  return { stats, counts, perDay, maxD, retention, systems, mastery, cats, now };
+  return { stats, counts, perDay, maxD, retention, systems, mastery, cats, now, week, lastWeek };
 }
 
-function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery, cats, onBoss }: ReturnType<typeof derive> & { onBoss?: (path: string, view: "systems", name: string) => void }) {
+function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery, cats, week, lastWeek, onBoss }: ReturnType<typeof derive> & { onBoss?: (path: string, view: "systems", name: string) => void }) {
   return (
     <div className="screen">
       <h1>Progress</h1>
@@ -68,6 +70,10 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
         <div className="stat"><b>{stats.streak}</b><span>day streak</span></div>
         <div className="stat"><b>{retention === null ? "–" : retention + "%"}</b><span>retention, 30 days</span></div>
         <div className="stat"><b>{store.reviews.length.toLocaleString()}</b><span>reviews all time</span></div>
+      </div>
+      <div className="card-box" style={{ marginTop: 12 }}>
+        <b>This week</b>
+        <div className="small muted" style={{ marginTop: 4 }}>{week.n.toLocaleString()} reviews in {week.mins} min{week.recall !== null ? `, ${week.recall}% recalled` : ""}. {lastWeek.n ? `Last week: ${lastWeek.n.toLocaleString()} in ${lastWeek.mins} min${lastWeek.recall !== null ? `, ${lastWeek.recall}%` : ""}.` : "No reviews the week before."}</div>
       </div>
       <h2>Last 12 weeks</h2>
       <div className="card-box" style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gridAutoFlow: "column", gridTemplateRows: "repeat(7, 1fr)", gap: 3 }}>

@@ -13,7 +13,7 @@ async function device(name: string) {
     await route.fulfill({ status: res.status, body: Buffer.from(await res.arrayBuffer()), contentType: "application/octet-stream" });
   });
   await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2500);
-  await page.click("nav.tabs >> text=Settings"); await page.waitForTimeout(400);
+  await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await page.waitForTimeout(400);
   await page.fill('input[placeholder="Amaerys"]', "o"); await page.locator("label:has-text('Repository') + input, .field:has(label:has-text('Repository')) input").first().fill("r");
   await page.fill('input[placeholder="github_pat_…"]', "t"); await page.fill('input[placeholder="S25 Ultra"]', name);
   return page;
@@ -39,14 +39,14 @@ try {
   };
   await study(B, ["good", "good", "good"]);
   await B.evaluate(() => { Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true }); document.dispatchEvent(new Event("visibilitychange")); Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true }); });
-  await B.waitForTimeout(3000); await B.click("nav.tabs >> text=Settings"); await B.waitForTimeout(300);
+  await B.waitForTimeout(3000); await B.click("nav.tabs >> text=Settings"); await B.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await B.waitForTimeout(300);
   console.log("B after study + leave:", await status(B), "|", await counts(B));
   // A pulls B's reviews
   await A.click("text=Sync now"); await A.waitForFunction(() => /pulled \d+ cards, 3 reviews/.test(document.body.innerText), null, { timeout: 60000 });
   console.log("A pulled:", await status(A), "|", await counts(A));
   // Race: both change something and sync at the same time.
   await study(A, ["good"]); await study(B, ["again"]);
-  await A.click("nav.tabs >> text=Settings"); await B.click("nav.tabs >> text=Settings"); await A.waitForTimeout(300);
+  await A.click("nav.tabs >> text=Settings"); await A.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await B.click("nav.tabs >> text=Settings"); await B.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await A.waitForTimeout(300);
   await Promise.all([A.click("text=Sync now"), B.click("text=Sync now")]);
   const settled = /pushed|Up to date|pulled|retry in a minute/;
   await A.waitForFunction((re) => re.test([...document.querySelectorAll("p.small")].map((p) => p.textContent).join(" ")) && !/Syncing/.test(document.body.innerText), settled, { timeout: 60000 });
@@ -71,10 +71,14 @@ try {
   await B.evaluate(() => (window as any).yuzu.undoLast()); await syncOf(B); await syncOf(A);
   console.log("A reviews after B's undo:", await A.evaluate(() => (window as any).yuzu.reviews.length), "(should be", revBefore + ")");
   // Shared images: A adds images from a deck file, turns sharing on, syncs; B receives them on its next sync.
-  await A.click("nav.tabs >> text=Settings"); await A.waitForTimeout(300);
+  await A.click("nav.tabs >> text=Settings"); await A.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await A.waitForTimeout(300);
   await A.locator('input[type=file][accept*=apkg]').nth(1).setInputFiles("test/fixtures/legacy-with-media.apkg"); await A.waitForFunction(() => /images added/.test(document.body.innerText), null, { timeout: 60000 });
   await A.evaluate(() => (window as any).yuzu.saveSettings({ mediaSync: true })); await syncOf(A);
   console.log("repo media files:", Object.keys(gh.files()).filter((k) => k.startsWith("media/")).length);
   await syncOf(B); await B.waitForTimeout(500); console.log("B images after sync:", await B.evaluate(() => (window as any).yuzu.media.size));
+  // Hooks sync: A writes a personal note on a card; B sees it after a sync.
+  const nid = await A.evaluate(() => (window as any).yuzu.notes.keys().next().value);
+  await A.evaluate((id) => (window as any).yuzu.setHook(id, "my hook: picture a yuzu"), nid); await syncOf(A); await syncOf(B);
+  console.log("hook on B:", await B.evaluate((id) => (window as any).yuzu.hookFor(id), nid));
   console.log("history A:", await A.evaluate(() => [...document.querySelectorAll("details li")].map((l) => l.textContent?.replace(/^.*· /, "")).slice(0, 4)));
 } finally { console.log("errors:", errors.length ? errors : "none"); await browser.close(); server.kill(); }

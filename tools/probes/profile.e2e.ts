@@ -3,7 +3,7 @@ const port = 8768; const server = spawn("python3", ["-m", "http.server", String(
 await new Promise((r) => setTimeout(r, 800));
 const browser = await chromium.launch(); const page = await (await browser.newContext({ viewport: { width: 1200, height: 800 } })).newPage();
 page.on("console", (m) => { if (m.type() === "error") console.log("console", m.text()); });
-await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2000); await page.click("nav.tabs >> text=Settings"); await page.waitForTimeout(1000);
+await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2000); await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await page.waitForTimeout(1000);
 let last = ""; const t0 = Date.now();
 const poll = setInterval(async () => { try { const m = await page.evaluate(() => document.querySelector(".bar + .small")?.textContent ?? ""); if (m && m !== last) { console.log(((Date.now() - t0) / 1000).toFixed(0) + "s", m); last = m; } } catch {} }, 1000);
 const file = process.argv[2]; await page.locator('input[type=file]').first().setInputFiles(file);

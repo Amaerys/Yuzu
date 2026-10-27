@@ -3,7 +3,7 @@ import { store, type View } from "../lib/store";
 import type { Card, Rating } from "../lib/model";
 import { renderCard, noteTitle } from "../lib/render";
 import { previewIntervals, humanInterval, retrievability, DAY } from "../scheduler/fsrs";
-import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore } from "./icons";
+import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore, IconEdit } from "./icons";
 import { systemColor, stamp, tilt } from "./theme";
 import { useBack } from "./useBack";
 
@@ -34,6 +34,29 @@ export function CardView({ html, css, dark }: { html: string; css: string; dark:
   return <div ref={ref} className={"card-host" + (dark ? " dark" : "")} />;
 }
 
+/** One line, rotating, after a session. Each is a well-replicated finding, phrased as something to do. */
+const TIPS = [
+  "Trying to recall before you look (even when you fail) beats rereading. You're already doing it.",
+  "A card you nearly got is worth a hint, not a reveal: a near-miss retrieval strengthens memory more than reading the answer.",
+  "Write a hook on cards that keep slipping — your own image or link, however silly. Self-made cues outlast given ones.",
+  "Short sessions spread over days beat one long one. Twenty minutes today and tomorrow > forty today.",
+  "Mixing topics in one session feels harder and works better: it trains you to tell similar things apart.",
+  "Sleep consolidates what you reviewed. Studying right before bed is good; losing sleep to study is not.",
+  "Hard ≠ failing. Cards that take effort to recall are the ones being strengthened the most.",
+  "Redo the day's misses while they're fresh: one more retrieval the same day is cheap and sticks.",
+  "Explaining why an answer is right (to yourself, in a sentence) makes it harder to forget than the fact alone.",
+  "Boss fights are cumulative tests: passing one after a gap is the best evidence that an area is really yours.",
+];
+
+/** First letters of each cloze answer: a near-miss helper for cards that are on the tip of the tongue. */
+function hintFor(note: { fields: string[] } | undefined, ord: number): string | null {
+  if (!note) return null;
+  const re = new RegExp(`\\{\\{c${ord + 1}::([\\s\\S]*?)(?:::[^}]*)?\\}\\}`, "g");
+  const answers = [...(note.fields[0] ?? "").matchAll(re)].map((m) => m[1].replace(/<[^>]+>/g, "").trim()).filter(Boolean);
+  if (!answers.length) return null;
+  return answers.map((a) => a.split(/\s+/).map((w) => w[0] + "·".repeat(Math.max(1, Math.min(6, w.length - 1)))).join(" ")).join("  /  ");
+}
+
 /** The paper index card: system-colored spine, rubber-stamp state, a tiny per-card tilt, and the next card peeking out below. */
 export function Paper({ card, html, css, dark, children }: { card: Card; html: string; css: string; dark: boolean; children?: React.ReactNode }) {
   const note = store.noteFor(card);
@@ -57,7 +80,7 @@ function estimateSeconds(): number {
   return Math.round(rs[Math.floor(rs.length / 2)] / 1000);
 }
 
-function CardInfo({ card, onClose, onSaved }: { card: Card; onClose: () => void; onSaved: () => void }) {
+function CardInfo({ card, onClose, onSaved, onTag }: { card: Card; onClose: () => void; onSaved: () => void; onTag?: (tag: string) => void }) {
   useBack(true, onClose);
   const note = store.noteFor(card)!;
   const nt = store.notetypeFor(note)!;
@@ -82,7 +105,8 @@ function CardInfo({ card, onClose, onSaved }: { card: Card; onClose: () => void;
               <div className="stat"><b>{card.reps}</b><span>reviews</span></div>
               <div className="stat"><b>{card.lapses}</b><span>lapses</span></div>
             </div>
-            <p className="small muted">Due {card.state === "new" ? "never studied" : new Date(card.due).toLocaleString()}<br />Source: {card.source}<br />Type: {nt.name}{note.tags.length ? <><br />Tags: {note.tags.join(", ")}</> : null}</p>
+            <p className="small muted">Due {card.state === "new" ? "never studied" : new Date(card.due).toLocaleString()}<br />Source: {card.source}<br />Type: {nt.name}</p>
+            {note.tags.length > 0 && <div className="row" style={{ flexWrap: "wrap", gap: 6, marginBottom: 8 }}>{note.tags.filter((t) => !t.startsWith("manual::")).map((t) => <button key={t} className={"chip" + (t.startsWith("auto::") ? " orange" : "")} onClick={() => onTag?.(t)} title="Browse this tag">{t.replace(/^auto::(System|Specialty|Exam|Level)::/, "$1: ")}</button>)}</div>}
             {history.length > 0 && (<><h2 style={{ marginTop: 6 }}>History</h2>
               {history.map((h) => <div key={h.id} className="list-row"><span className="t">{new Date(h.ts).toLocaleDateString()} <span className="muted">{new Date(h.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></span><span className={"chip " + (h.rating === 1 ? "" : "orange")}>{labels[h.rating]}</span><span className="small muted">{h.scheduledDays ? h.scheduledDays + "d" : ""}</span></div>)}
             </>)}
@@ -105,7 +129,7 @@ function CardInfo({ card, onClose, onSaved }: { card: Card; onClose: () => void;
 
 export type StudyScope = { path: string; view?: View; only?: "all" | "due" | "new"; preset?: Card[]; title?: string };
 
-export function Study({ path, view = "decks", only = "all", preset, title, onExit }: StudyScope & { onExit: () => void }) {
+export function Study({ path, view = "decks", only = "all", preset, title, onExit, onBrowseTag }: StudyScope & { onExit: () => void; onBrowseTag?: (tag: string) => void }) {
   const fullQueue = useMemo(() => preset ?? store.queue(path, Date.now(), view, only), [path, view, only]);
   const [plan, setPlan] = useState<number | null>(preset || fullQueue.length <= 15 ? fullQueue.length : null);
   const startedAt = useRef(Date.now());
@@ -121,6 +145,9 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
   const touch = useRef<{ x: number; y: number; t: number } | null>(null);
   const [drag, setDrag] = useState(0);
   const [typed, setTyped] = useState("");
+  const [hint, setHint] = useState(false);
+  const [hookOpen, setHookOpen] = useState(false);
+  const [hookText, setHookText] = useState("");
   const [leech, setLeech] = useState<{ cardId: string; lapses: number } | null>(null);
   const [menu, setMenu] = useState(false);
   const total = queue.length;
@@ -139,7 +166,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
     setQueue((q) => { const seen = new Set(q.slice(idx).map((c) => c.id)); const add = back.filter((c) => !seen.has(c.id)); if (!add.length) return q; const at = Math.min(q.length, idx + 1); return [...q.slice(0, at), ...add, ...q.slice(at)]; });
   }, [idx]);
 
-  useEffect(() => { shownAt.current = Date.now(); setShowAnswer(false); setInfo(false); setTyped(""); }, [card?.id]);
+  useEffect(() => { shownAt.current = Date.now(); setShowAnswer(false); setInfo(false); setTyped(""); setHint(false); setHookOpen(false); setHookText(card ? store.hookFor(card.nid) : ""); }, [card?.id]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -148,6 +175,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
       if (e.key === " " || e.key === "Enter") { e.preventDefault(); if (!showAnswer) setShowAnswer(true); else answer(3); }
       if (showAnswer && ["1", "2", "3", "4"].includes(e.key)) answer(Number(e.key) as Rating);
       if (e.key === "i") setInfo(true);
+      if (e.key === "h" && !showAnswer) setHint(true);
       if (e.key === "z" && (e.ctrlKey || e.metaKey)) undo();
       if (e.key === "Escape") onExit();
     };
@@ -169,6 +197,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
     return idx.map((i) => note.fields[i]).join(" ").replace(/\[sound:[^\]]+\]/g, "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
   }, [card?.id, typing]);
   const norm = (x: string) => x.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const hintText = useMemo(() => (card ? hintFor(note ?? undefined, card.ord) : null), [card?.id]);
   const typedOk = typed && answerText ? norm(typed) === norm(answerText) || norm(answerText).split(/[;,/]|\s-\s/).map((x) => x.trim()).includes(norm(typed)) : null;
 
   const busy = useRef(false);
@@ -240,6 +269,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
           <div className="done">
             <div className="big">{doneCount}</div>
             <div>cards in {mins} min{results.length ? ` · ${Math.round((ok / results.length) * 100)}% recalled` : ""}</div>
+            <p className="small muted tip">{TIPS[(doneCount + new Date().getDate()) % TIPS.length]}</p>
             {missed.length > 0 && (
               <div className="card-box" style={{ textAlign: "left", marginTop: 18 }}>
                 <b>{missed.length} missed</b>
@@ -271,6 +301,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
         <div style={{ position: "fixed", inset: 0, zIndex: 34 }} onClick={() => setMenu(false)} />
         <div className="menu">
           <button onClick={() => { setMenu(false); setInfo(true); }}><IconInfo /> Card info and edit</button>
+          <button onClick={() => { setMenu(false); setShowAnswer(true); setHookOpen(true); }}><IconEdit /> {hookText ? "Edit my hook" : "Add my hook"}</button>
           <button onClick={() => { setMenu(false); store.setFlag(card.id, card.flag ? 0 : 1); }}><IconFlag /> {card.flag ? "Remove flag" : "Flag this card"}</button>
           <button className="danger" onClick={async () => { setMenu(false); await store.setSuspended(card.id, true); flash("Paused — won't be shown again until unsuspended"); setIdx((i) => i + 1); }}><IconPause /> Pause this card</button>
         </div>
@@ -285,11 +316,22 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
         {drag > 40 && <div className="swipe-hint good">Good</div>}
         {rendered && <Paper card={card} html={showAnswer ? rendered.back : rendered.front} css={rendered.css} dark={dark}>
           {typing && !showAnswer && <div style={{ marginTop: 12 }} onClick={(e) => e.stopPropagation()}><input className="typeans" autoFocus={false} placeholder="Type the answer, then Enter" value={typed} onChange={(e) => setTyped(e.target.value)} autoCapitalize="none" autoCorrect="off" /></div>}
+          {!showAnswer && hint && hintText && <div className="hint-line" onClick={(e) => e.stopPropagation()}>{hintText}</div>}
+          {showAnswer && (hookOpen || hookText) && (
+            <div className="hook" onClick={(e) => e.stopPropagation()}>
+              {hookOpen ? (
+                <>
+                  <textarea className="typeans" rows={2} placeholder="My hook — an image, a link, a mnemonic that makes this stick" value={hookText} onChange={(e) => setHookText(e.target.value)} autoFocus />
+                  <div className="row" style={{ marginTop: 6 }}><button className="btn grow" onClick={() => { setHookOpen(false); setHookText(store.hookFor(card.nid)); }}>Cancel</button><button className="btn primary grow" onClick={async () => { await store.setHook(card.nid, hookText); setHookOpen(false); flash(hookText.trim() ? "Hook saved" : "Hook removed"); }}>Save</button></div>
+                </>
+              ) : <button className="hook-text" onClick={() => setHookOpen(true)}><span className="small muted">my hook</span>{hookText}</button>}
+            </div>
+          )}
           {typing && showAnswer && typed && <div style={{ marginTop: 10 }}><span className="chip" style={{ background: typedOk ? "rgba(127,163,74,.2)" : "rgba(214,90,60,.18)", color: typedOk ? "#4e6e2a" : "#a33a22" }}>{typedOk ? "✓ " : "✗ "}{typed}{!typedOk && answerText ? ` → ${answerText}` : ""}</span></div>}
         </Paper>}
       </div>
       {!showAnswer ? (
-        <div className="show-bar"><button className="btn primary block" onClick={() => setShowAnswer(true)}>Show answer</button></div>
+        <div className="show-bar row">{hintText && !hint && <button className="btn" onClick={() => setHint(true)} title="First letters (h)">Hint</button>}<button className="btn primary grow" onClick={() => setShowAnswer(true)}>Show answer</button></div>
       ) : (
         <div className="answer-bar">
           <button className="again" onClick={() => answer(1)}>Again<small>{intervals?.[1]}</small></button>
@@ -298,7 +340,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
           <button className="easy" onClick={() => answer(4)}>Easy<small>{intervals?.[4]}</small></button>
         </div>
       )}
-      {info && <CardInfo card={card} onClose={() => setInfo(false)} onSaved={() => { setRev((r) => r + 1); flash("Saved"); }} />}
+      {info && <CardInfo card={card} onClose={() => setInfo(false)} onSaved={() => { setRev((r) => r + 1); flash("Saved"); }} onTag={onBrowseTag ? (t) => { setInfo(false); onBrowseTag(t); } : undefined} />}
       {leech && (
         <div className="sheet-backdrop" onClick={() => setLeech(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>
           <b>This card keeps slipping</b>

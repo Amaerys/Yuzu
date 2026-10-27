@@ -158,6 +158,7 @@ export class Store {
             const { sync: _s, deviceName: _d, nightCards: _n, swipe: _w, typeAnswers: _t, mediaDownload: _m, ...rest } = got.settings as any; // per-device fields stay local
             this.settings = { ...this.settings, ...rest }; await db.setMeta("settings", this.settings);
           }
+          if (got.hooks) { let changed = false; const merged = { ...this.hooks }; for (const [k, v] of Object.entries(got.hooks as typeof this.hooks)) if ((merged[k]?.m ?? -1) < v.m) { merged[k] = v; changed = true; } if (changed) { this.hooks = merged; await db.setMeta("hooks", merged); } }
           if (got.media) { const blobs: { name: string; blob: Blob }[] = []; for (const [name, url] of Object.entries(got.media as Record<string, string>)) { if (this.media.has(name)) continue; const blob = await (await fetch(url)).blob(); this.media.set(name, blob); blobs.push({ name, blob }); } if (blobs.length) { await db.putMany("media", blobs); this.mediaUrls.clear(); } }
           if (pulledN + pulledC + pulledR) this.treeCache.clear();
         }
@@ -179,7 +180,7 @@ export class Store {
         progress("Preparing upload");
         if (!this.shardCache.size) { const saved = await db.getMeta<[string, { fp: string; hash: string }][]>("shardCache", []); for (const [k, v] of saved) this.shardCache.set(k, v); }
         const { hashes, make } = await GitHubSync.shard({
-          notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(), mediaIndex,
+          notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(), mediaIndex, hooks: this.hooks,
           settings: { ...this.settings, sync: undefined, updatedAt: (this.settings as any).updatedAt ?? 0 },
         }, this.shardCache);
         try {
@@ -322,6 +323,7 @@ export class Store {
     this.dismissedPairs = new Set(await db.getMeta<string[]>("dismissedPairs", []));
     this.inbox = await db.getMeta<typeof this.inbox>("inbox", []);
     this.undoStack = await db.getMeta<typeof this.undoStack>("undoStack", []);
+    this.hooks = await db.getMeta<typeof this.hooks>("hooks", {});
     this.packLog = await db.getMeta<typeof this.packLog>("packLog", []);
     this.mergeLog = await db.getMeta<typeof this.mergeLog>("mergeLog2", []);
     this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) } };
@@ -466,6 +468,17 @@ export class Store {
     await db.setMeta("mergeLog2", this.mergeLog);
     this.bump(); this.touch();
     return `${merged} duplicate groups merged (${dropped} notes removed), ${moved.toLocaleString()} cards moved to new categories, ${tagged.toLocaleString()} tags added${c.review?.length ? `, ${c.review.length} similar pairs tagged needs-review::similar` : ""}.`;
+  }
+
+  // ---- hooks (personal notes on cards) --------------------------------------
+  hooks: Record<string, { t: string; m: number }> = {};
+  hookFor(nid: string): string { return this.hooks[nid]?.t ?? ""; }
+  async setHook(nid: string, text: string) {
+    const t = text.trim();
+    if (!t && !this.hooks[nid]) return;
+    this.hooks = { ...this.hooks, [nid]: { t, m: Date.now() } }; // an empty text is kept as a tombstone so the deletion syncs
+    await this.persist("saving your note", db.setMeta("hooks", this.hooks));
+    this.bump(); this.touch();
   }
 
   // ---- inbox ---------------------------------------------------------------
@@ -922,12 +935,18 @@ export class Store {
   /** Full backup as a plain object (token excluded). */
   backup() {
     const { sync, ...settings } = this.settings;
-    return { app: "yuzu", version: 1, at: Date.now(), settings: { ...settings, sync: { ...sync, token: "" } }, notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones };
+    return { app: "yuzu", version: 1, at: Date.now(), settings: { ...settings, sync: { ...sync, token: "" } }, notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, hooks: this.hooks };
+  }
+  /** Small backup: everything irreplaceable (reviews, settings, personal notes, scheduling), without the card text that the repository or Anki can restore. */
+  quickBackup() {
+    const { sync, ...settings } = this.settings;
+    return { app: "yuzu", version: 1, quick: true, at: Date.now(), settings: { ...settings, sync: { ...sync, token: "" } }, cards: [...this.cards.values()].filter((c) => c.reps > 0 || c.suspended || c.flag), reviews: this.reviews, tombstones: this.tombstones, hooks: this.hooks };
   }
   async restore(data: any, onProgress?: (m: string, f: number) => void) {
     if (data?.app !== "yuzu") throw new Error("Not a Yuzu backup file");
     for (const nt of data.notetypes ?? []) this.notetypes.set(nt.id, nt);
     if (data.tombstones) { this.tombstones = mergeTombstones(this.tombstones, data.tombstones); await db.setMeta("tombstones", this.tombstones); }
+    if (data.hooks) { const merged = { ...this.hooks }; for (const [k, v] of Object.entries(data.hooks as typeof this.hooks)) if ((merged[k]?.m ?? -1) < v.m) merged[k] = v; this.hooks = merged; await db.setMeta("hooks", merged); }
     const n = mergeNotes(this.notes, data.notes ?? [], this.tombstones); const c = mergeCards(this.cards, data.cards ?? [], this.tombstones);
     const known = new Set(this.reviews.map((r) => r.id));
     const m = mergeReviews(this.reviews, data.reviews ?? []); this.reviews = m.list;

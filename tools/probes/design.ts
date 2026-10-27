@@ -5,7 +5,7 @@ const browser = await chromium.launch(); const page = await (await browser.newCo
 const errors: string[] = []; page.on("pageerror", (e) => errors.push(e.message));
 const shot = (n: string) => page.screenshot({ path: `/home/claude/final/design/${n}.png` });
 try {
-  await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2500); await page.click("nav.tabs >> text=Settings"); await page.waitForTimeout(400);
+  await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2500); await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await page.waitForTimeout(400);
   await page.locator('input[type=file]').first().setInputFiles(process.argv[2] ?? "test/fixtures/medicine-legacy.apkg");
   await page.waitForFunction(() => /Imported/.test(document.body.innerText), null, { timeout: 600000 });
   if (process.argv[3]) { await page.locator('input[type=file]').first().setInputFiles(process.argv[3]); await page.waitForFunction(() => /duplicate groups merged/.test(document.body.innerText), null, { timeout: 300000 }); }

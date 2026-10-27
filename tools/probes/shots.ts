@@ -6,7 +6,7 @@ const browser = await chromium.launch(); const page = await (await browser.newCo
 const errors: string[] = []; page.on("pageerror", (e) => errors.push(e.message)); page.on("dialog", (d) => d.accept());
 const shot = (n: string) => page.screenshot({ path: `/home/claude/final/shots/${n}.png` });
 try {
-  await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2500); await page.click("nav.tabs >> text=Settings"); await page.waitForTimeout(500);
+  await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2500); await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await page.waitForTimeout(500);
   await page.locator('input[type=file]').first().setInputFiles("/home/claude/final/Finalcollex.colpkg");
   await page.waitForFunction(() => /Imported/.test(document.body.innerText), null, { timeout: 600000 });
   await page.locator('input[type=file]').first().setInputFiles("/home/claude/final/curation.yuzu.json");
@@ -25,6 +25,6 @@ try {
   const boss = await page.locator("text=Boss fight").count(); console.log("boss available on Cardiovascular:", boss);
   if (boss) { await page.click("text=Boss fight"); await page.waitForTimeout(800); await shot("boss"); await page.click("text=Show answer"); await page.waitForTimeout(300); await page.click("text=Got it"); await page.waitForTimeout(300); await page.click('[aria-label="Close"]'); }
   await page.click("nav.tabs >> text=Progress"); await page.waitForTimeout(1500); await shot("progress"); await page.evaluate(() => window.scrollBy(0, 900)); await page.waitForTimeout(300); await shot("progress-2");
-  await page.click("nav.tabs >> text=Settings"); await page.waitForTimeout(500); await page.evaluate(() => window.scrollBy(0, 600)); await shot("settings");
+  await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await page.waitForTimeout(500); await page.evaluate(() => window.scrollBy(0, 600)); await shot("settings");
   console.log("mastery sample:", await page.evaluate(() => { const m = (window as any).yuzu.masteryBySystem(); return [...m].slice(0, 3).map(([k, v]: any) => `${k}: ${JSON.stringify(v)}`).join(" | "); }));
 } finally { console.log("errors:", errors.length ? errors : "none"); await browser.close(); server.kill(); }

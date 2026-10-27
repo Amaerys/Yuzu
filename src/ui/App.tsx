@@ -75,6 +75,14 @@ function AppInner() {
   const startBoss = (path: string, view: View, name: string) => setStudy({ path, view, boss: name });
   const [update, setUpdate] = useState<(() => void) | null>(null);
   const [inbox, setInbox] = useState(false);
+  const [libraryTarget, setLibraryTarget] = useState<{ view: View; path: string; query?: string; n: number } | null>(null);
+  const browse = (view: View, path: string, query?: string) => { setStudy(null); setInbox(false); setTab("library"); setLibraryTarget({ view, path, query, n: Date.now() }); };
+  const browseTag = (tag: string) => {
+    if (tag.startsWith("auto::System::")) browse("systems", tag.slice(14));
+    else if (tag.startsWith("auto::Specialty::")) browse("specialties", tag.slice(17));
+    else if (tag.startsWith("auto::Exam::")) browse("exams", tag.slice(12));
+    else browse("tags", tag);
+  };
 
   useEffect(() => {
     const onUpdate = (e: Event) => setUpdate(() => (e as CustomEvent).detail as () => void);
@@ -89,13 +97,13 @@ function AppInner() {
     return <div className="screen" style={{ display: "flex", flexDirection: "column", gap: 16, alignItems: "center", justifyContent: "center", minHeight: "80dvh" }}><YuzuMark size={56} />{slow && <div className="small muted" style={{ textAlign: "center" }}>Still loading… a large collection can take a few seconds.<br /><button className="btn" style={{ marginTop: 10 }} onClick={repairApp}>Repair app</button></div>}</div>;
   }
   if (study !== null && study.boss !== undefined) return <Boss path={study.path} view={study.view ?? "decks"} name={study.boss} onExit={() => setStudy(null)} />;
-  if (study !== null) return <Study {...study} onExit={() => setStudy(null)} />;
+  if (study !== null) return <Study {...study} onExit={() => setStudy(null)} onBrowseTag={browseTag} />;
 
   return (
     <div className="app">
       {inbox ? <Inbox onClose={() => setInbox(false)} /> : <>
-      {tab === "today" && <Today onStudy={startStudy} onInbox={() => setInbox(true)} />}
-      {tab === "library" && <Library onStudy={startStudy} onBoss={startBoss} />}
+      {tab === "today" && <Today onStudy={startStudy} onInbox={() => setInbox(true)} onSearch={(q) => browse("decks", "", q)} onBoss={startBoss} />}
+      {tab === "library" && <Library onStudy={startStudy} onBoss={startBoss} initial={libraryTarget} />}
       {tab === "progress" && <Progress onBoss={startBoss} />}
       {tab === "settings" && <Settings onInbox={() => setInbox(true)} />}
       </>}

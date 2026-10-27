@@ -60,9 +60,10 @@ function SmartEditor({ initial, onClose }: { initial?: SmartDeck; onClose: () =>
   );
 }
 
-export function Library({ onStudy, onBoss }: { onStudy: (path: string, view: View, extra?: { only?: "all" | "due" | "new" }) => void; onBoss: (path: string, view: View, name: string) => void }) {
-  const [view, setView] = useState<View>("decks");
-  const [path, setPath] = useState("");
+export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, view: View, extra?: { only?: "all" | "due" | "new" }) => void; onBoss: (path: string, view: View, name: string) => void; initial?: { view: View; path: string; query?: string; n: number } | null }) {
+  const [view, setView] = useState<View>(initial?.view ?? "decks");
+  const [path, setPath] = useState(initial?.path ?? "");
+  useEffect(() => { if (initial) { setView(initial.view); setPath(initial.path); setQuery(initial.query ?? ""); setShowCards(!!initial.query); } }, [initial?.n]);
   const [showCards, setShowCards] = useState(false);
   const [query, setQuery] = useState("");
   const [q, setQ] = useState(""); // debounced

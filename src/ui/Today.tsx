@@ -2,7 +2,7 @@ import { store, type View } from "../lib/store";
 import { YuzuMark, IconPlay } from "./icons";
 import { DAY } from "../scheduler/fsrs";
 import { systemColor } from "./theme";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 /** A yuzu cut in half: 8 segments fill as the daily goal is reached. */
 export function YuzuGoal({ value, max, size = 104, center, sub }: { value: number; max: number; size?: number; center?: string | number; sub?: string }) {
@@ -30,10 +30,10 @@ export function YuzuGoal({ value, max, size = 104, center, sub }: { value: numbe
 }
 
 type OnStudy = (path: string, view?: View, extra?: { only?: "all" | "due" | "new"; preset?: import("../lib/model").Card[]; title?: string }) => void;
-export function Today({ onStudy, onInbox }: { onStudy: OnStudy; onInbox?: () => void }) {
+export function Today({ onStudy, onInbox, onSearch, onBoss }: { onStudy: OnStudy; onInbox?: () => void; onSearch?: (q: string) => void; onBoss?: (path: string, view: View, name: string) => void }) {
   const v = store.getVersion();
   const d = useMemo(() => derive(), [v]);
-  return <TodayView {...d} onStudy={onStudy} onInbox={onInbox} />;
+  return <TodayView {...d} onStudy={onStudy} onInbox={onInbox} onSearch={onSearch} onBoss={onBoss} />;
 }
 
 function derive() {
@@ -55,10 +55,15 @@ function derive() {
   const maxF = Math.max(1, ...forecast);
   const top = tree.children.filter((c) => c.due + c.newCount + c.learning > 0).sort((a, b) => b.due - a.due).slice(0, 6);
   const missed = store.missedToday(now); const weakest = store.weakestSystem(now);
-  return { pins, tree, stats, queue, counts, now, forecast, maxF, top, missed, weakest };
+  // A boss fight worth offering: a system with 10+ well-learned cards that has not been beaten in the last 14 days.
+  const mastery = store.masteryBySystem(now);
+  const bossReady = [...mastery].filter(([name, m]) => m.mastered + m.durable >= 10 && (now - (store.settings.bosses[`systems:${name}`]?.at ?? 0)) > 14 * DAY).sort((a, b) => (b[1].mastered + b[1].durable) - (a[1].mastered + a[1].durable)).slice(0, 1).map(([name, m]) => ({ name, ready: m.mastered + m.durable }))[0] ?? null;
+  return { pins, tree, stats, queue, counts, now, forecast, maxF, top, missed, weakest, bossReady };
 }
 
-function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, top, missed, weakest, onStudy, onInbox }: ReturnType<typeof derive> & { onStudy: OnStudy; onInbox?: () => void }) {
+function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, top, missed, weakest, bossReady, onStudy, onInbox, onSearch, onBoss }: ReturnType<typeof derive> & { onStudy: OnStudy; onInbox?: () => void; onSearch?: (q: string) => void; onBoss?: (path: string, view: View, name: string) => void }) {
+  const [q, setQ] = useState("");
+  const goalDone = stats.today >= stats.goal && stats.goal > 0;
   return (
     <div className="screen">
       <div className="row" style={{ marginBottom: 6 }}><YuzuMark /><h1 style={{ margin: 0 }}>Yuzu</h1><div className="grow" />
@@ -69,7 +74,7 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, top,
         <div className="card-box"><div style={{ fontWeight: 700, marginBottom: 6 }}>Nothing to study yet</div><div className="muted small">Go to Settings and import your Anki collection. Review history comes with it, so nothing starts over.</div></div>
       ) : (
         <>
-          <div className="hero">
+          <div className={"hero" + (goalDone ? " goal-done" : "")}>
             <YuzuGoal value={stats.today} max={stats.goal} size={150} center={queue.length} sub="ready" />
             <div>
               <div className="lead"><b>{queue.length.toLocaleString()} cards</b> ready: {tree.due.toLocaleString()} due, {tree.learning} learning and {Math.min(tree.newCount, Math.max(0, store.settings.newPerDay - store.reviewedToday().newCards))} new for today.</div>
@@ -82,9 +87,15 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, top,
             <div className="stat"><b>{stats.today}</b><span>reviews today</span></div>
             <div className="stat"><b>{counts.review.toLocaleString()}</b><span>cards learned</span></div>
           </div>
-          {(missed.length >= 3 || weakest) && (
+          {onSearch && <form className="field" style={{ margin: "12px 0 0" }} onSubmit={(e) => { e.preventDefault(); if (q.trim()) onSearch(q.trim()); }}><input placeholder="Search all cards and tags" value={q} onChange={(e) => setQ(e.target.value)} /></form>}
+          {(missed.length >= 3 || weakest || bossReady) && (
             <>
               <h2>Worth a few minutes</h2>
+              {bossReady && onBoss && (
+                <button className="stack" style={{ "--spine": "var(--yuzu)" } as any} onClick={() => onBoss(bossReady.name, "systems", bossReady.name)}>
+                  <span className="name">Boss fight: {bossReady.name}<div className="meta">{bossReady.ready} well-learned cards — 20 at random, no hints, 85% to pass</div></span><span className="muted"><IconPlay /></span>
+                </button>
+              )}
               {missed.length >= 3 && (
                 <button className="stack" style={{ "--spine": "var(--clay)" } as any} onClick={() => onStudy("", "decks", { preset: missed, title: "Missed today" })}>
                   <span className="name">Redo today's misses<div className="meta">{missed.length} cards you got wrong today, once more while they're fresh</div></span><span className="muted"><IconPlay /></span>

@@ -74,7 +74,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
   return (
     <div className="screen">
       <h1>Settings</h1>
-      <h2>Studying</h2>
+      <details className="section" open><summary>Studying <span className="small muted">new cards, goal, order, scheduler</span></summary>
       <div className="card-box">
         <div className="field"><label>New cards per day</label><input type="number" min={0} max={500} value={s.newPerDay} onChange={(e) => store.saveSettings({ newPerDay: Number(e.target.value) })} /></div>
         <div className="field"><label>Daily review goal</label><input type="number" min={1} max={2000} value={s.dailyGoal} onChange={(e) => store.saveSettings({ dailyGoal: Number(e.target.value) })} /></div>
@@ -107,8 +107,8 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           </select></div>
       </div>
 
-      {reversible.length > 0 && (<>
-        <h2>Language cards</h2>
+      </details>
+      {reversible.length > 0 && <details className="section"><summary>Language cards <span className="small muted">reverse and typed cards</span></summary>
         <div className="card-box">
           <p className="small muted" style={{ marginTop: 0 }}>Reverse cards ask the other direction (German → English as well as English → German). Turning one off suspends its reverse cards; history is kept.</p>
           {reversible.map(({ nt, notes, on }) => (
@@ -116,15 +116,16 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           ))}
           {revMsg && <p className="small muted" style={{ marginBottom: 0 }}>{revMsg}</p>}
         </div>
-      </>)}
-      <h2>Cards to ask Claude about</h2>
+      </details>}
+      <details className="section"><summary>Cards to ask Claude about <span className="small muted">leeches you flagged</span></summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>Leeches you marked as "mixed up with something similar". Copy the list into the chat and I'll make contrast cards for them.</p>
         {(() => { const list = askList; return list.length ? (
           <div className="row"><span className="small grow">{list.length} card{list.length === 1 ? "" : "s"}</span><button className="btn" onClick={async () => { const text = list.map((n) => "- " + noteTitle(n)).join("\n"); try { await navigator.clipboard.writeText(text); setResult("Copied " + list.length + " cards."); } catch { prompt("Copy this list:", text); } }}>Copy list</button><button className="btn" onClick={async () => { for (const n of list) await store.updateNote(n.id, n.fields, n.tags.filter((t) => t !== "ask-claude" && !t.startsWith("auto::"))); setScan((x) => x + 1); }}>Clear</button></div>
         ) : <p className="small muted" style={{ margin: 0 }}>Nothing yet.</p>; })()}
       </div>
-      <h2>Import from Anki</h2>
+      </details>
+      <details className="section"><summary>Import from Anki <span className="small muted">collection, packs, curation</span></summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>Export from Anki as a <b>collection package (.colpkg)</b> or a deck (.apkg) <b>without media</b>, with scheduling included. Importing again later only adds what's new. Also accepts <b>Yuzu card packs</b> and <b>curation files</b> (.json) made by Claude: duplicates are skipped or merged, cards move to their categories, similar cards get the tag <i>needs-review::similar</i>. Large collections: import on a PC first, then sync to the phone.</p>
         <label className="row small" style={{ marginBottom: 10 }}><input type="checkbox" checked={skipLanguages} onChange={(e) => setSkipLanguages(e.target.checked)} /> Skip the Languages decks</label>
@@ -135,7 +136,8 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         {last && !busy && <p className="small muted" style={{ marginBottom: 0 }}>Last import {new Date(last.at).toLocaleString()}: {last.summary?.cards?.toLocaleString()} cards.</p>}
       </div>
 
-      <h2>Images</h2>
+      </details>
+      <details className="section" open><summary>Images <span className="small muted">per device · shared</span></summary>
       <div className="card-box">
         {(() => { const m = mediaStat; return <p className="small muted" style={{ marginTop: 0 }}>{m.stored.toLocaleString()} of {m.total.toLocaleString()} images your cards use are on this device ({(m.bytes / 1048576).toFixed(0)} MB). Images stay on each device; to add some, export a deck from Anki as .apkg <b>with media</b> and choose it here. Only the images your cards reference are kept, shrunk to fit a phone screen.</p>; })()}
         <input ref={mediaRef} type="file" accept=".apkg,.colpkg,.zip" style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && onMedia(e.target.files[0])} />
@@ -149,13 +151,15 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         <p className="small muted" style={{ marginBottom: 0 }}>Images move 15 MB per sync, in the background, up to about 900 MB in total. Add images on the PC once, switch sharing on, and the phone picks them up over the next syncs; switch "download" off on a device that should stay small.</p>
       </div>
 
-      <h2>Inbox</h2>
+      </details>
+      <details className="section"><summary>Inbox <span className="small muted">packs from Claude</span></summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>Packs placed in the <b>inbox</b> folder of your sync repository arrive here on the next sync and wait for your review. {store.inbox.length ? `${store.inbox.length} waiting.` : "Nothing waiting."}{store.packLog.length ? ` ${store.packLog.length} packs added so far (removable).` : ""}</p>
         <button className="btn block" onClick={onInbox}>Open inbox</button>
       </div>
 
-      <h2>Sync between devices</h2>
+      </details>
+      <details className="section" open><summary>Sync between devices</summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>Uses a <b>private</b> GitHub repository, like Orange. Create one named <b>yuzu-data</b>, then a fine-grained token limited to it with <b>Contents: read and write</b>. The token stays on this device.</p>
         <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Amaerys" /></div>
@@ -183,18 +187,22 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         )}
       </div>
 
-      <h2>Data</h2>
+      </details>
+      <details className="section"><summary>Data <span className="small muted">back up, restore, wipe</span></summary>
       <div className="card-box">
-        <div className="small muted">{store.notes.size.toLocaleString()} notes · {store.cards.size.toLocaleString()} cards · {store.reviews.length.toLocaleString()} reviews on this device.</div>
+        <div className="small muted">{store.notes.size.toLocaleString()} notes · {store.cards.size.toLocaleString()} cards · {store.reviews.length.toLocaleString()} reviews on this device. A quick backup holds only what cannot be rebuilt (reviews, scheduling, settings, your hooks; about 1 MB); the full one includes every card's text.</div>
         <div className="row" style={{ marginTop: 10 }}>
-          <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Back up</button>
+          <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.quickBackup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-quick-${new Date().toISOString().slice(0, 10)}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Quick backup</button>
+          <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Full backup</button>
           <button className="btn grow" onClick={() => restoreRef.current?.click()}>Restore backup</button>
           <input ref={restoreRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; try { const r = await store.restore(JSON.parse(await f.text())); setResult(`Restored: ${r.cards} cards, ${r.notes} notes and ${r.reviews} reviews merged.`); } catch (err: any) { setResult("Restore failed: " + err.message); } e.target.value = ""; }} />
         </div>
         <button className="btn danger block" style={{ marginTop: 10 }} onClick={async () => { if (confirm("Delete all cards and reviews from this device?")) await store.wipe(); }}>Delete everything on this device</button>
       </div>
-      <h2>Diagnostics</h2>
+      </details>
+      <details className="section"><summary>Diagnostics <span className="small muted">storage, errors, repair</span></summary>
       <Diagnostics />
+      </details>
       <p className="small muted" style={{ textAlign: "center", marginTop: 24 }}>Yuzu {__VERSION__}</p>
     </div>
   );

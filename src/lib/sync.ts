@@ -27,6 +27,8 @@ export interface SyncSnapshot {
   tombstones?: Record<string, number>;
   /** Small pack images as data URLs (name → data URL). */
   media?: Record<string, string>;
+  /** Personal hooks ("my way of remembering this"): note id → { t: text, m: modified }. Written as hooks.json. */
+  hooks?: Record<string, { t: string; m: number }>;
   /** Shared deck images: file name → stored path in the repo and size. Written as media/index.json. */
   mediaIndex?: Record<string, { p: string; s: number }>;
 }
@@ -216,6 +218,7 @@ export class GitHubSync {
     await emit("settings.json", JSON.stringify(snap.settings), () => JSON.stringify(snap.settings));
     const media = snap.media ?? {};
     if (Object.keys(media).length) await emit("media.json", "m" + Object.keys(media).sort().join(","), () => JSON.stringify(media));
+    if (snap.hooks && Object.keys(snap.hooks).length) await emit("hooks.json", "h" + Object.keys(snap.hooks).length + ":" + Object.values(snap.hooks).reduce((a, b) => a + b.m, 0), () => JSON.stringify(snap.hooks));
     if (snap.mediaIndex && Object.keys(snap.mediaIndex).length) await emit("media/index.json", "i" + Object.keys(snap.mediaIndex).length + ":" + Object.values(snap.mediaIndex).reduce((a, b) => a + b.s, 0), () => JSON.stringify(snap.mediaIndex));
     const tombs = snap.tombstones ?? {};
     if (Object.keys(tombs).length) await emit("tombstones.json", "t" + Object.keys(tombs).length + ":" + Object.values(tombs).reduce((a, b) => a + b, 0), () => JSON.stringify(tombs));
@@ -263,6 +266,7 @@ export class GitHubSync {
       else if (p === "tombstones.json") out.tombstones = data;
       else if (p === "media.json") out.media = data;
       else if (p === "media/index.json") out.mediaIndex = data;
+      else if (p === "hooks.json") out.hooks = data;
       else if (p.startsWith("notes/")) out.notes = (out.notes ?? []).concat(data);
       else if (p.startsWith("cards/")) out.cards = (out.cards ?? []).concat(data);
       else if (p.startsWith("reviews/")) out.reviews = (out.reviews ?? []).concat(data);

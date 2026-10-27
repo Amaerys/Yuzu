@@ -169,3 +169,20 @@ select.chip { appearance: none; border: 0; }
 .milestone b { display: block; font-size: 13px; }
 .milestone span { display: block; }
 .boss-score { font-size: 64px; font-weight: 800; color: var(--yuzu); font-variation-settings: "wdth" 85; letter-spacing: -0.03em; }
+
+/* Hooks and hints on the paper card */
+.hint-line { margin-top: 12px; padding: 8px 10px; border-radius: 8px; background: rgba(255,122,26,.12); color: #8a4a12; font-family: ui-monospace, Menlo, monospace; font-size: 15px; letter-spacing: .04em; }
+.slate .hint-line { color: var(--orange-2); }
+.hook { margin-top: 14px; border-top: 2px dashed rgba(0,0,0,.14); padding-top: 10px; }
+.slate .hook { border-top-color: rgba(255,255,255,.14); }
+.hook-text { display: block; width: 100%; text-align: left; font-size: 16px; line-height: 1.4; font-style: italic; color: inherit; padding: 0; }
+.hook-text .small { display: block; font-style: normal; margin-bottom: 2px; }
+.show-bar.row { gap: 8px; }
+.tip { max-width: 34ch; margin: 10px auto 0; line-height: 1.4; }
+.goal-done .ring { animation: glow 1.2s ease-out 1; }
+@keyframes glow { 0% { filter: drop-shadow(0 0 0 rgba(242,211,75,0)); transform: scale(1); } 40% { filter: drop-shadow(0 0 18px rgba(242,211,75,.9)); transform: scale(1.04); } 100% { filter: none; transform: scale(1); } }
+details.section > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 600; margin: 22px 0 10px; }
+details.section > summary::-webkit-details-marker { display: none; }
+details.section > summary::after { content: "›"; margin-left: auto; color: var(--muted); transition: transform .15s; font-size: 20px; }
+details.section[open] > summary::after { transform: rotate(90deg); }
+details.section > summary .small { font-weight: 500; }

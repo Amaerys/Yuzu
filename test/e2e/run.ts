@@ -17,7 +17,7 @@ try {
   await page.waitForSelector("text=Nothing to study yet", { timeout: 15000 });
   console.log("zstd native:", await page.evaluate(() => { try { new DecompressionStream("zstd" as any); return true; } catch { return false; } }));
   await page.screenshot({ path: `${shots}/01-empty.png` });
-  await page.click("nav.tabs >> text=Settings");
+  await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; }));
   await page.setInputFiles('input[type=file]', fixture);
   await page.waitForFunction(() => document.body.innerText.includes("Imported "), null, { timeout: 180000 });
   const summary = await page.locator("text=/Imported .*/").first().innerText();
@@ -58,7 +58,7 @@ try {
   await page.locator(".list-row").first().click(); await page.waitForSelector("text=Preview"); await page.screenshot({ path: `${shots}/04d-preview.png` });
   await page.click('[aria-label="Close preview"]');
   // Card pack import with an image, then study it
-  await page.click("nav.tabs >> text=Settings");
+  await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; }));
   await page.setInputFiles('input[type=file] >> nth=0', "test/fixtures/hyperkalemia.yuzu.json");
   await page.waitForFunction(() => document.body.innerText.includes("cards added"), null, { timeout: 30000 });
   console.log("pack:", await page.locator("text=/cards added/").first().innerText());
@@ -70,8 +70,8 @@ try {
   await page.screenshot({ path: `${shots}/09-pack-preview.png` });
   await page.click('[aria-label="Close preview"]');
   // Backup download
-  await page.click("nav.tabs >> text=Settings");
-  const [dl] = await Promise.all([page.waitForEvent("download"), page.click("text=Back up")]);
+  await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; }));
+  const [dl] = await Promise.all([page.waitForEvent("download"), page.click("text=Full backup")]);
   const bpath = await dl.path(); const bsize = bpath ? fs.statSync(bpath).size : 0; console.log("backup bytes:", bsize);
   await page.click("nav.tabs >> text=Today");
   await page.click(".hero >> text=Study");

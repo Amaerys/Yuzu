@@ -4,7 +4,7 @@ await new Promise((r) => setTimeout(r, 800));
 const browser = await chromium.launch(); const page = await (await browser.newContext({ viewport: { width: 412, height: 915 }, deviceScaleFactor: 2 })).newPage();
 const errors: string[] = []; page.on("pageerror", (e) => errors.push(e.message));
 try {
-  await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2500); await page.click("nav.tabs >> text=Settings"); await page.waitForTimeout(400);
+  await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2500); await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await page.waitForTimeout(400);
   await page.locator('input[type=file]').first().setInputFiles("test/fixtures/medicine-legacy.apkg"); await page.waitForFunction(() => /Imported/.test(document.body.innerText), null, { timeout: 120000 });
   await page.click("nav.tabs >> text=Today"); await page.waitForTimeout(500); await page.click(".hero >> text=Study"); await page.waitForTimeout(500);
   await page.click(".done .btn >> text=/^10 minutes/"); await page.waitForTimeout(500);
