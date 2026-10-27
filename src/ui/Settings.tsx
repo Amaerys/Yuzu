@@ -44,7 +44,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
     try {
       const handles = new Map<string, { getFile(): Promise<File> }>(); let n = 0;
       for await (const [name, h] of dir.entries()) { if (h.kind === "file") handles.set(name, h); if (++n % 2000 === 0) setMediaMsg(`Reading “${dir.name}” · ${n.toLocaleString()} files`); }
-      const got = { name: dir.name as string, handles }; setAnkiDir(got); return got;
+      const got = { name: dir.name as string, handles }; setAnkiDir(got); await store.linkAnkiFolder(dir); return got;
     } finally { setBusy(false); setMediaBusy(false); }
   }
   async function onChooseFolder() {
@@ -241,11 +241,13 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
               </div>
             </div>
           )}
+          {canPickDir && <AutoSend busy={busy} />}
           {mediaMsg && <p className="small" style={{ marginBottom: 0 }}>{mediaMsg}</p>}
           <details className="how"><summary className="small">How to bring your Anki media in</summary>
             <ol className="small muted">
               <li><b>Phone only:</b> in AnkiDroid or Anki, export your collection as <b>.colpkg</b> with <b>“Include media”</b> ticked, then choose that file here. Big libraries take a while; you can stop and run it again — it continues where it left off.</li>
               <li><b>PC first (fastest for big libraries):</b> on the PC, under <b>Phone media file straight from Anki</b>, press <b>1</b> and pick Anki's <code>collection.media</code> folder (Anki → Tools → Check Media → View Files shows it), then <b>2</b> and pick where to save (e.g. Downloads). Copy the file(s) to the phone and choose them here — already shrunk, so they load in minutes.</li>
+              <li><b>After that, nothing to do:</b> the PC remembers Anki's folder. Whenever it syncs, your phone gets the media it is missing (new cards included) with its next sync. If the browser asks again after a restart, press <b>Allow</b>.</li>
               <li><b>Study with pictures on the PC too:</b> press <b>Choose media folder</b> and pick the same folder.</li>
               <li>Only files your cards use are kept. Images are resized to phone size (usually 5–10× smaller); sounds stay as they are.</li>
             </ol>
@@ -370,5 +372,26 @@ function MissingMedia() {
           </details>))}
       </>)}
     </details>
+  );
+}
+
+/** PC: Anki's media folder linked once → every sync sends the other devices the media they are missing. */
+function AutoSend({ busy }: { busy: boolean }) {
+  const [, setTick] = useState(0);
+  useEffect(() => { store.loadAnkiFolderState().then(() => setTick((t) => t + 1)); return store.subscribe(() => setTick((t) => t + 1)); }, []);
+  const others = store.otherWants();
+  return (
+    <div className="field" style={{ marginTop: 10 }}>
+      <label>Send new media automatically <span className="muted">(PC with Anki)</span></label>
+      {store.ankiDirAccess === "none" ? (
+        <p className="small muted" style={{ margin: "0 0 6px" }}>Press <b>1. Pick Anki's media folder</b> once. From then on, whenever this PC syncs, your phone gets the pictures and sounds it is missing — new cards included. Nothing to copy by hand.</p>
+      ) : store.ankiDirAccess === "prompt" ? (
+        <div className="row"><span className="small grow">Linked to <b>{store.ankiDirName}</b> — the browser wants your OK again after a restart.</span><button className="btn primary" disabled={busy} onClick={() => store.allowAnkiFolder()}>Allow</button></div>
+      ) : (
+        <div className="row"><span className="small grow">✓ Linked to <b>{store.ankiDirName}</b>. Each sync sends what your other devices are missing.</span><button className="btn" disabled={busy} onClick={() => store.unlinkAnkiFolder()}>Unlink</button></div>
+      )}
+      {others.length > 0 && <ul className="small muted" style={{ margin: "6px 0 0" }}>{others.map((w) => <li key={w.device}><b>{w.device}</b>: {w.total ? `missing ${w.total.toLocaleString()} file${w.total === 1 ? "" : "s"}` : "has everything"} <span className="muted">(as of {fmtDateTime(w.at)})</span></li>)}</ul>}
+      {store.sendNote && <p className="small" style={{ margin: "6px 0 0" }}>{store.sendNote}</p>}
+    </div>
   );
 }
