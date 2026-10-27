@@ -95,6 +95,10 @@ export function rewriteMedia(html: string, resolve?: (name: string) => string | 
     return url ? `<${tag}${attrs} src="${url}"` : whole;
   });
   out = out.replace(/<script[\s\S]*?<\/script>/gi, "");
+  // AnKing-family hint buttons (Sketchy, First Aid, Boards & Beyond…) open with a script Yuzu removes:
+  // turn each into a native tap-to-open section that works without scripts.
+  if (out.includes("hintBtn")) out = out.replace(/<span[^>]*class=["']hintBtn["'][^>]*data-name=["']([^"']+)["'][^>]*>[\s\S]*?<div[^>]*class=["']hints["'][^>]*>([\s\S]*?)<\/div>\s*<\/span>/gi,
+    (_, name, body) => `<details class="yz-hint"><summary>${name}</summary><div class="hints">${body}</div></details>`);
   // Deck HTML runs in the app's origin: drop inline event handlers and javascript: URLs (their functions are gone with the scripts anyway).
   out = out.replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "").replace(/(href|src)\s*=\s*(["']?)\s*javascript:[^"'>\s]*\2/gi, "");
   return out;

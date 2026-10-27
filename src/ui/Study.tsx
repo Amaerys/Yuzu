@@ -8,10 +8,17 @@ import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore, IconEdit 
 import { systemColor, stamp, tilt } from "./theme";
 import { useBack } from "./useBack";
 import { sfx } from "./sfx";
+import { SKIN_CSS, isShortCard } from "./cardskin";
 import { wireSounds, playSounds, stopSounds, cardSounds } from "./sound";
 
-const BASE_CSS = `
-:host { display:block; }
+export const BASE_CSS = `
+:host { display:block; contain: layout paint; }
+details.yz-hint { display:inline-block; vertical-align:top; margin:4px 6px 4px 0; }
+details.yz-hint[open] { display:block; }
+details.yz-hint > summary { list-style:none; cursor:pointer; display:inline-block; padding:4px 10px; border:2px solid currentColor; font-size:13px; opacity:.75; }
+details.yz-hint > summary::-webkit-details-marker { display:none; }
+details.yz-hint[open] > summary { opacity:1; }
+details.yz-hint .hints { display:block !important; margin-top:6px; }
 .card { font-size: 20px; line-height: 1.45; font-family: inherit; }
 img { max-width: 100%; height: auto; border-radius: 8px; }
 hr#answer { border: 0; border-top: 2px dashed rgba(0,0,0,.18); margin: 16px -4px; }
@@ -36,7 +43,8 @@ export function CardView({ html, css, dark, side = "front", autoplay = false }: 
     const host = ref.current!;
     const root = host.shadowRoot ?? host.attachShadow({ mode: "open" });
     const cls = dark ? "night_mode nightMode" : "";
-    root.innerHTML = `<style>${BASE_CSS}</style><style>${css}</style><div class="${cls}"><div class="card ${cls}">${html}</div></div>`;
+    const skin = store.settings.cardStyle !== "deck";
+    root.innerHTML = `<style>${BASE_CSS}</style><style>${css}</style>${skin ? `<style>${SKIN_CSS}</style>` : ""}<div class="${cls}"><div class="card ${cls}${skin && isShortCard(html) ? " yz-short" : ""}">${html}</div></div>`;
     host.scrollTop = 0;
     const own = wireSounds(root, side);
     if (autoplay && own.length) playSounds(own); else stopSounds();

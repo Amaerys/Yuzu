@@ -100,6 +100,9 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         <div className="card-box">
           <div className="themes">{THEMES.map((t) => <button key={t.id} className={s.theme === t.id ? "on" : ""} onClick={() => { store.saveSettings({ theme: t.id }); sfx.tap(); }}><span className="sw">{t.sw.map((c) => <i key={c} style={{ background: c }} />)}</span>{t.name}</button>)}</div>
           <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={s.sfx} onChange={(e) => { store.saveSettings({ sfx: e.target.checked }); if (e.target.checked) setTimeout(() => sfx.answer(3), 50); }} /> Sound effects (short 8-bit blips on answers, goal and boss fights)</label>
+          <div className="row" style={{ marginTop: 12, gap: 8 }}><span className="small grow">Card look</span>
+            <div className="seg">{(["yuzu", "deck"] as const).map((v) => <button key={v} className={s.cardStyle === v ? "on" : ""} onClick={() => store.saveSettings({ cardStyle: v })}>{v === "yuzu" ? "Yuzu" : "Deck's own"}</button>)}</div></div>
+          <p className="small muted" style={{ margin: "6px 0 0" }}>Yuzu gives every deck the same calm type, orange cloze answers and tidy extras; the deck's own look shows each Anki deck as it was designed.</p>
         </div>
       </details>
       <details className="section" open><summary>Studying <span className="small muted">new cards, goal, order, scheduler</span></summary>

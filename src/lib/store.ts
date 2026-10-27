@@ -45,6 +45,8 @@ export interface Settings {
   sfx: boolean;
   /** Play card sounds automatically when a side appears (per device). */
   autoplay: boolean;
+  /** "yuzu" lays one reading style over every deck's CSS; "deck" shows each deck's own look (per device). */
+  cardStyle: "yuzu" | "deck";
   /** Anki deck path → Yuzu category, learned from curation files; applied to new cards on every later Anki import (synced). */
   deckMap: Record<string, string>;
   smart: SmartDeck[];
@@ -53,7 +55,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, maxReviewsPerDay: 0, dueOrder: "forgotten", rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
-  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, deckMap: {},
+  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", deckMap: {},
 };
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
 export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number; pending?: boolean }
@@ -189,7 +191,7 @@ export class Store {
           if (got.cards) { const changed: Card[] = []; for (const c of got.cards) { const l = this.cards.get(c.id); if ((this.tombstones["c:" + c.id] ?? -1) >= (c.mod ?? c.lastReview) || (this.tombstones["n:" + c.nid] ?? -1) >= (c.mod ?? c.lastReview)) continue; if (!l || (c.mod ?? c.lastReview) > (l.mod ?? l.lastReview)) changed.push(c); } pulledC = mergeCards(this.cards, got.cards, this.tombstones); await db.putMany("cards", changed); }
           if (got.reviews) { const m = mergeReviews(this.reviews, got.reviews, this.tombstones); pulledR = m.added; if (m.added) { const ids = new Set(this.reviews.map((r) => r.id)); await db.putMany("reviews", got.reviews.filter((r) => !ids.has(r.id))); this.reviews = m.list; } }
           if (got.settings && (got.settings as any).updatedAt > ((this.settings as any).updatedAt ?? 0)) {
-            const { sync: _s, deviceName: _d, nightCards: _n, swipe: _w, typeAnswers: _t, mediaDownload: _m, theme: _th, sfx: _sf, autoplay: _ap, ...rest } = got.settings as any; // per-device fields stay local
+            const { sync: _s, deviceName: _d, nightCards: _n, swipe: _w, typeAnswers: _t, mediaDownload: _m, theme: _th, sfx: _sf, autoplay: _ap, cardStyle: _cs, ...rest } = got.settings as any; // per-device fields stay local
             this.settings = { ...this.settings, ...rest }; await db.setMeta("settings", this.settings);
           }
           if (got.hooks) { let changed = false; const merged = { ...this.hooks }; for (const [k, v] of Object.entries(got.hooks as typeof this.hooks)) if ((merged[k]?.m ?? -1) < v.m) { merged[k] = v; changed = true; } if (changed) { this.hooks = merged; await db.setMeta("hooks", merged); } }
@@ -460,11 +462,20 @@ export class Store {
     for (const n of r.notes) this.notes.set(n.id, n);
     // Revised notes keep their existing cards (and scheduling); new cloze numbers get new cards,
     // cloze numbers that disappeared are suspended rather than deleted so sync stays consistent.
+    // Existing cards are matched by note + template/cloze number, not by id: an Anki card keeps its Anki id
+    // (and its scheduling) when a pack revises the note.
     const updated = new Set(r.updated); const cardsOut: Card[] = [];
-    for (const c of r.cards) { if (updated.has(c.nid) && this.cards.has(c.id)) continue; this.cards.set(c.id, c); cardsOut.push(c); }
+    const byNoteOrd = new Map<string, Card>();
+    if (updated.size) for (const c of this.cards.values()) if (updated.has(c.nid)) byNoteOrd.set(c.nid + "#" + c.ord, c);
+    const kept = new Set<string>();
+    for (const c of r.cards) {
+      const prev = updated.has(c.nid) ? (this.cards.get(c.id) ?? byNoteOrd.get(c.nid + "#" + c.ord)) : undefined;
+      if (prev) { kept.add(prev.id); continue; }
+      this.cards.set(c.id, c); cardsOut.push(c); kept.add(c.id);
+    }
     if (updated.size) {
-      const keep = new Set(r.cards.map((c) => c.id)); const now = stamp();
-      for (const c of this.cards.values()) if (updated.has(c.nid) && !keep.has(c.id) && !c.suspended) { const s2 = { ...c, suspended: true, mod: now }; this.cards.set(c.id, s2); cardsOut.push(s2); }
+      const now = stamp();
+      for (const c of this.cards.values()) if (updated.has(c.nid) && !kept.has(c.id) && !c.suspended) { const s2 = { ...c, suspended: true, mod: now }; this.cards.set(c.id, s2); cardsOut.push(s2); }
     }
     r.cards = cardsOut;
     const blobs: { name: string; blob: Blob }[] = [];
@@ -476,7 +487,7 @@ export class Store {
 
   /** Apply a curation file made by Claude: deck moves, note merges (keep one note, drop the copies, union tags) and tag additions. */
   async importCuration(json: unknown, onProgress?: (msg: string, frac: number) => void): Promise<string> {
-    const c = json as { yuzu_curation: 1; name?: string; decks?: Record<string, string | null>; merges?: { keep: string; drop: string[]; tags?: string[] }[]; review?: string[][]; tags?: Record<string, string[]>; suspend?: string[] };
+    const c = json as { yuzu_curation: 1; name?: string; decks?: Record<string, string | null>; merges?: { keep: string; drop: string[]; tags?: string[] }[]; review?: string[][]; tags?: Record<string, string[]>; suspend?: string[]; edits?: { id: string; fields: Record<string, string>; tags?: string[] }[]; packs?: unknown[] };
     if (!c || c.yuzu_curation !== 1) throw new Error("Not a Yuzu curation file");
     const now = stamp();
     const changedNotes = new Map<string, Note>(); const changedCards = new Map<string, Card>();
@@ -515,7 +526,18 @@ export class Store {
     onProgress?.("Tagging", 0.7);
     for (const [tag, ids] of Object.entries(c.tags ?? {})) for (const id of ids) { const n = this.notes.get(id); if (n && !n.tags.includes(tag)) { touchNote(id, (x) => x.tags.push(tag)); tagged++; } }
     for (const g of c.review ?? []) for (const id of g) { const n = this.notes.get(id); if (n && !n.tags.includes("needs-review::similar")) touchNote(id, (x) => x.tags.push("needs-review::similar")); }
-    // 4. suspend (e.g. notes the deck's author removed in Anki): history kept, reversible from the Library.
+    // 4. edits: rewrite fields of existing notes in place (note type, cards and review history stay).
+    // Marked as edited, so a later Anki update of the same note is flagged instead of overwriting the fix.
+    let edited = 0;
+    for (const e of c.edits ?? []) {
+      const n = changedNotes.get(e.id) ?? this.notes.get(e.id); if (!n) continue;
+      const fields = [...n.fields]; let diff = false;
+      for (const [k, v] of Object.entries(e.fields)) { const i = Number(k); if (Number.isInteger(i) && i >= 0 && i < fields.length && fields[i] !== v) { fields[i] = v; diff = true; } }
+      if (!diff && !e.tags?.length) continue;
+      touchNote(e.id, (x) => { x.fields = fields; x.edited = now; for (const t of e.tags ?? []) if (!x.tags.includes(t)) x.tags.push(t); });
+      if (diff) edited++;
+    }
+    // 5. suspend (e.g. notes the deck's author removed in Anki): history kept, reversible from the Library.
     let suspended = 0;
     for (const id of c.suspend ?? []) for (const card of byNid.get(id) ?? []) { const cur = changedCards.get(card.id) ?? this.cards.get(card.id); if (cur && !cur.suspended) { const m = { ...cur, suspended: true, mod: now }; this.cards.set(card.id, m); changedCards.set(card.id, m); suspended++; } }
     // Remember where Anki decks belong, so later imports land new cards in the right category by themselves.
@@ -528,7 +550,10 @@ export class Store {
     this.mergeLog = [...log.map((e, i) => ({ at: now + i, keep: e.keep, dropped: e.dropped, cards: e.cards, keepBefore: keepSnap.get(e.keep)!.note, keepCardsBefore: keepSnap.get(e.keep)!.cards })), ...this.mergeLog].slice(0, 1000);
     await db.setMeta("mergeLog2", this.mergeLog);
     this.bump(); this.touch();
-    return `${merged} duplicate groups merged (${dropped} notes removed), ${moved.toLocaleString()} cards moved to new categories, ${tagged.toLocaleString()} tags added${c.review?.length ? `, ${c.review.length} similar pairs tagged needs-review::similar` : ""}${suspended ? `, ${suspended} cards suspended` : ""}.`;
+    // 6. card packs carried in the same file (new cards, placed by their own category)
+    const packMsgs: string[] = [];
+    for (const [i, p] of (c.packs ?? []).entries()) { onProgress?.(`Adding cards (${i + 1}/${c.packs!.length})`, 0.9 + (0.1 * i) / c.packs!.length); packMsgs.push(`${(p as any)?.name ?? "Pack"}: ${await this.importPack(p)}.`); }
+    return `${merged} duplicate groups merged (${dropped} notes removed), ${moved.toLocaleString()} cards moved to new categories, ${tagged.toLocaleString()} tags added${c.review?.length ? `, ${c.review.length} similar pairs tagged needs-review::similar` : ""}${edited ? `, ${edited.toLocaleString()} cards improved` : ""}${suspended ? `, ${suspended} cards suspended` : ""}.${packMsgs.length ? " " + packMsgs.join(" ") : ""}`;
   }
 
   // ---- hooks (personal notes on cards) --------------------------------------
