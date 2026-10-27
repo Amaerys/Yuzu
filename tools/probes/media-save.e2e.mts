@@ -34,6 +34,14 @@ try {
   const opfs = await page.evaluate(`(async () => { const root = await navigator.storage.getDirectory(); const d = await root.getDirectoryHandle("Downloads"); const out = []; for await (const [n, h] of d.entries()) { const f = await h.getFile(); out.push(n + " " + f.size); window.__zip = Array.from(new Uint8Array(await f.arrayBuffer())); } return out; })()`);
   console.log("in folder:", opfs);
   const zipBytes = Buffer.from(await page.evaluate(() => (window as any).__zip)); const zf = `${dir}/../saved.zip`; fs.writeFileSync(zf, zipBytes);
+  console.log("after save, lung.mp3 still stored (nothing deleted):", await page.evaluate(() => (window as any).yuzu.media.has("lung.mp3")));
+  page.once("dialog", (d) => { console.log("confirm:", d.message().slice(0, 160)); d.accept(); });
+  await page.click('button:has-text("Check stored files")');
+  await page.waitForFunction(() => /Forgot \d+ unreadable|All [\d,]+ stored files read fine/.test(document.body.innerText), null, { timeout: 60000 });
+  console.log("check:", await page.evaluate(() => document.body.innerText.match(/(Forgot|All) [^\n]*/)?.[0]));
+  await page.locator("input[webkitdirectory]").setInputFiles(dir);
+  await page.waitForFunction(() => /^Added|Nothing new/m.test(document.body.innerText), null, { timeout: 60000 });
+  console.log("re-add:", await page.evaluate(() => document.body.innerText.match(/(Added|Nothing new)[^\n]*/)?.[0]), "heart readable:", await page.evaluate(`window.yuzu.media.get("heart.mp3").arrayBuffer().then((b) => b.byteLength)`));
   // 2) phone / other browsers: download
   await page.evaluate(() => { delete (window as any).showDirectoryPicker; });
   const [dl] = await Promise.all([page.waitForEvent("download"), page.click('button:has-text("Save media file")')]);

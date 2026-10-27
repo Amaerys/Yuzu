@@ -35,6 +35,18 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
     finally { setBusy(false); setMediaBusy(false); stopRef.current = null; if (mediaRef.current) mediaRef.current.value = ""; if (folderRef.current) folderRef.current.value = ""; }
   }
   async function hasMedia(file: Blob) { try { const z = new ZipFile(file, inflateRaw); const l = await z.list(); return l.length > 3 && l.some((e) => e.name === "media"); } catch { return false; } }
+  async function onCheckMedia() {
+    setBusy(true); setMediaBusy(true); setMediaMsg("Checking stored files");
+    try {
+      const r = await holdAwake(() => store.checkMedia((m) => setMediaMsg(m)));
+      if (!r.unreadable.length) { setMediaMsg(`All ${r.checked.toLocaleString()} stored files read fine.`); return; }
+      const why = Object.entries(r.errors).map(([k, v]) => `${k} ×${v.toLocaleString()}`).join(", ");
+      const msg = `${r.unreadable.length.toLocaleString()} of ${r.checked.toLocaleString()} stored files can no longer be read by the browser (${why}). They show as broken on cards. Forget them so “Choose media folder” (or “Choose file”) adds them again?`;
+      if (confirm(msg)) { await store.dropMedia(r.unreadable); setMediaMsg(`Forgot ${r.unreadable.length.toLocaleString()} unreadable file${r.unreadable.length === 1 ? "" : "s"}. Now press “Choose media folder” and pick Anki's collection.media to add them again.`); }
+      else setMediaMsg(`${r.unreadable.length.toLocaleString()} stored files can't be read (${why}). Nothing was changed.`);
+    } catch (e: any) { setMediaMsg("Failed: " + (e?.message ?? e)); }
+    finally { setBusy(false); setMediaBusy(false); }
+  }
   async function onExportMedia() {
     // On a PC (Chrome/Edge) pick a folder once and every part is written straight into it — no giant downloads.
     let dir: any = null; const pick = (window as any).showDirectoryPicker;
@@ -44,7 +56,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       const { files, skipped } = await holdAwake(() => store.exportMedia((m) => setMediaMsg(m), dir));
       if (!dir) for (const f of files) { const a = document.createElement("a"); a.href = URL.createObjectURL(f.blob!); a.download = f.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000); }
       const list = files.map((f) => `${f.name} (${(f.size / 1048576).toFixed(0)} MB)`).join(", ");
-      setMediaMsg(files.length ? `Saved ${list}${dir ? ` in “${dir.name}”` : ""}. On the other device choose ${files.length > 1 ? "each file" : "it"} with “Choose file”.` + (skipped.length ? ` ${skipped.length.toLocaleString()} file${skipped.length === 1 ? "" : "s"} couldn't be read on this device and ${skipped.length === 1 ? "was" : "were"} left out — add them again with “Choose media folder”.` : "") : "No media on this device yet.");
+      setMediaMsg(files.length ? `Saved ${list}${dir ? ` in “${dir.name}”` : ""}. On the other device choose ${files.length > 1 ? "each file" : "it"} with “Choose file”.` + (skipped.length ? ` ${skipped.length.toLocaleString()} file${skipped.length === 1 ? "" : "s"} couldn't be read by the browser and ${skipped.length === 1 ? "was" : "were"} left out of the media file (nothing was deleted). “Check stored files” below can repair them.` : "") : "No media on this device yet.");
     } catch (e: any) { setMediaMsg("Failed: " + (e?.message ?? e)); }
     finally { setBusy(false); setMediaBusy(false); }
   }
@@ -206,6 +218,8 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
             <button className="btn" disabled={busy || !mediaStat.bytes} onClick={async () => { if (confirm("Remove all deck images and sounds from this device? Cards keep working; media shows as placeholders until added again.")) { setMediaMsg(`Removed ${(await store.clearMedia()).toLocaleString()} files.`); } }}>Remove</button>
           </div>
           {mediaStat.missing.length > 0 && <MissingMedia key={mediaStat.stored} />}
+          <button className="btn" style={{ marginTop: 8, width: "100%" }} disabled={busy || !mediaStat.stored} onClick={onCheckMedia}>Check stored files</button>
+
         </>)}
         <div className="field" style={{ marginTop: 12 }}><label>Hidden fields <span className="muted">(never shown, their pictures never kept)</span></label>
           <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>

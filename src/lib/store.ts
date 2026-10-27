@@ -666,13 +666,40 @@ export class Store {
   }
   /** Add media from an Anki export with media, a Yuzu media file, or files picked from Anki's media folder. Stopping keeps what is stored; running it again resumes. */
   async addMediaFrom(input: Blob | File[], env: MediaEnv) {
-    const batch: { name: string; blob: Blob }[] = [];
-    const flush = async () => { if (!batch.length) return; await db.putMany("media", batch.splice(0)); };
+    // Every stored file is read back from the database before it counts. The in-memory copy is then the
+    // database's own (not the freshly made picture), so a big library never piles gigabytes of temporary
+    // pictures into the browser. A file that doesn't read back isn't kept and stays "missing", so running
+    // the import again retries it.
+    const batch: { name: string; blob: Blob }[] = []; let unreadable = 0;
+    const flush = async () => {
+      if (!batch.length) return; const items = batch.splice(0); await db.putMany("media", items);
+      for (const { name } of items) {
+        let ok = false;
+        try { const row = await db.getOne<{ name: string; blob: Blob }>("media", name); if (row?.blob) { await row.blob.slice(0, 64).arrayBuffer(); this.media.set(name, row.blob); ok = true; } } catch { /* not readable */ }
+        if (!ok) { unreadable++; this.media.delete(name); try { await db.deleteMany("media", [name]); } catch { /* best effort */ } }
+      }
+    };
     try { await navigator.storage?.persist?.(); } catch { /* best effort: keeps the browser from evicting a big library */ }
     try {
-      return await importMedia(input, this.notes.values(), (n) => this.media.has(n), async (name, blob) => { this.media.set(name, blob); batch.push({ name, blob }); if (batch.length >= 40) await flush(); }, env, { notetypes: this.notetypes.values(), skipField: this.skipHidden() });
+      const r = await importMedia(input, this.notes.values(), (n) => this.media.has(n), async (name, blob) => { this.media.set(name, blob); batch.push({ name, blob }); if (batch.length >= 40) await flush(); }, env, { notetypes: this.notetypes.values(), skipField: this.skipHidden() });
+      await flush(); r.stored -= unreadable; r.failed += unreadable; return r;
     } finally { await flush(); this.mediaUrls.clear(); this.bump(); }
   }
+  /** Read every stored file once (a few bytes each) and report the ones the browser can no longer read. Deletes nothing. */
+  async checkMedia(onProgress?: (msg: string) => void): Promise<{ checked: number; unreadable: string[]; errors: Record<string, number> }> {
+    const unreadable: string[] = []; const errors: Record<string, number> = {}; let checked = 0; const names = [...this.media.keys()];
+    for (const name of names) {
+      try { await this.media.get(name)!.slice(0, 64).arrayBuffer(); }
+      catch {
+        try { const row = await db.getOne<{ name: string; blob: Blob }>("media", name); if (!row?.blob) throw new Error("NotInDatabase"); await row.blob.slice(0, 64).arrayBuffer(); this.media.set(name, row.blob); }
+        catch (e: any) { unreadable.push(name); const k = e?.name || e?.message || "Error"; errors[k] = (errors[k] ?? 0) + 1; }
+      }
+      if (++checked % 500 === 0) onProgress?.(`Checked ${checked.toLocaleString()} of ${names.length.toLocaleString()}${unreadable.length ? ` · ${unreadable.length.toLocaleString()} unreadable` : ""}`);
+    }
+    return { checked, unreadable, errors };
+  }
+  /** Forget only the given files (after a check) so "Choose media folder" adds them again. */
+  async dropMedia(names: string[]) { for (const n of names) this.media.delete(n); await db.deleteMany("media", names); this.mediaUrls.clear(); this.bump(); return names.length; }
   /** This device's media (already shrunk) as one or more Yuzu media files, to carry to another device. */
   /**
    * Pack this device's media into Yuzu media files (split at 1.8 GB / 60k files).
@@ -707,7 +734,7 @@ export class Store {
         const blob = await writeZip(files, opts); out.push({ name, blob, size: blob.size });
       }
     }
-    if (skipped.length) { const names = skipped.map((z) => z.slice(2)); for (const n of names) this.media.delete(n); await db.deleteMany("media", names); this.mediaUrls.clear(); this.bump(); }
+    // Nothing is deleted here: a file that can't be read is only left out of the media file and reported.
     return { files: out, skipped };
   }
   async clearMedia(keepPacks = true) {
