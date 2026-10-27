@@ -47,6 +47,8 @@ export interface Settings {
   autoplay: boolean;
   /** "yuzu" lays one reading style over every deck's CSS; "deck" shows each deck's own look (per device). */
   cardStyle: "yuzu" | "deck";
+  /** Note fields never shown and whose media is never kept (synced), e.g. AnKing's Sketchy fields. */
+  hiddenFields: string[];
   /** Anki deck path → Yuzu category, learned from curation files; applied to new cards on every later Anki import (synced). */
   deckMap: Record<string, string>;
   smart: SmartDeck[];
@@ -55,7 +57,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, maxReviewsPerDay: 0, dueOrder: "forgotten", rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
-  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", deckMap: {},
+  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {},
 };
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
 export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number; pending?: boolean }
@@ -618,11 +620,26 @@ export class Store {
   }
 
   // ---- media ---------------------------------------------------------------
+  /** Field filter for hidden fields (per note type, by field name). */
+  skipHidden(): ((n: Note, i: number) => boolean) | undefined {
+    const names = new Set(this.settings.hiddenFields.map((x) => x.trim().toLowerCase())); if (!names.size) return undefined;
+    const idx = new Map<string, Set<number>>();
+    for (const nt of this.notetypes.values()) { const set = new Set<number>(); nt.fields.forEach((f, i) => { if (names.has(f.trim().toLowerCase())) set.add(i); }); if (set.size) idx.set(nt.id, set); }
+    return (n, i) => idx.get(n.ntid)?.has(i) ?? false;
+  }
+  /** Delete stored media no visible card uses (e.g. after hiding Sketchy). Pack images and template files stay. */
+  async pruneMedia(): Promise<{ files: number; bytes: number }> {
+    const refs = this.mediaRefs(); const del: string[] = []; let bytes = 0;
+    for (const [name, blob] of this.media) if (!refs.has(name) && !name.startsWith("pack-") && !name.startsWith("_")) { del.push(name); bytes += blob.size; }
+    for (const n of del) this.media.delete(n);
+    if (del.length) { await db.deleteMany("media", del); this.mediaUrls.clear(); this.bump(); }
+    return { files: del.length, bytes };
+  }
   /** Media the cards reference vs what this device holds. */
   private refsCache: { key: string; refs: Set<string> } | null = null;
   mediaRefs(): Set<string> {
-    const key = `${this.notes.size}:${this.version}`;
-    if (this.refsCache?.key !== key) this.refsCache = { key, refs: mediaRefs(this.notes.values(), this.notetypes.values()) };
+    const key = `${this.notes.size}:${this.version}:${this.settings.hiddenFields.join("|")}`;
+    if (this.refsCache?.key !== key) this.refsCache = { key, refs: mediaRefs(this.notes.values(), this.notetypes.values(), this.skipHidden()) };
     return this.refsCache.refs;
   }
   mediaStatus(): { total: number; stored: number; bytes: number; images: { total: number; stored: number }; sounds: { total: number; stored: number }; missing: string[] } {
@@ -640,7 +657,7 @@ export class Store {
     const flush = async () => { if (!batch.length) return; await db.putMany("media", batch.splice(0)); };
     try { await navigator.storage?.persist?.(); } catch { /* best effort: keeps the browser from evicting a big library */ }
     try {
-      return await importMedia(input, this.notes.values(), (n) => this.media.has(n), async (name, blob) => { this.media.set(name, blob); batch.push({ name, blob }); if (batch.length >= 40) await flush(); }, env, { notetypes: this.notetypes.values() });
+      return await importMedia(input, this.notes.values(), (n) => this.media.has(n), async (name, blob) => { this.media.set(name, blob); batch.push({ name, blob }); if (batch.length >= 40) await flush(); }, env, { notetypes: this.notetypes.values(), skipField: this.skipHidden() });
     } finally { await flush(); this.mediaUrls.clear(); this.bump(); }
   }
   /** This device's media (already shrunk) as one or more Yuzu media files, to carry to another device. */

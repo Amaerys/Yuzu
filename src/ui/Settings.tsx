@@ -203,6 +203,13 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           </div>
           {mediaStat.missing.length > 0 && <details className="how"><summary className="small">Show what's missing</summary><p className="small muted" style={{ wordBreak: "break-all" }}>{mediaStat.missing.slice(0, 60).join(" · ")}{mediaStat.total - mediaStat.stored > 60 ? " …" : ""}</p></details>}
         </>)}
+        <div className="field" style={{ marginTop: 12 }}><label>Hidden fields <span className="muted">(never shown, their pictures never kept)</span></label>
+          <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+            {s.hiddenFields.map((f) => <button key={f} className="chip" onClick={() => store.saveSettings({ hiddenFields: s.hiddenFields.filter((x) => x !== f) })} aria-label={`Show ${f} again`}>{f} ✕</button>)}
+            <input placeholder="Add a field name" style={{ flex: "1 1 140px", minWidth: 0 }} onKeyDown={(e) => { const v = (e.target as HTMLInputElement).value.trim(); if (e.key === "Enter" && v && !s.hiddenFields.includes(v)) { store.saveSettings({ hiddenFields: [...s.hiddenFields, v] }); (e.target as HTMLInputElement).value = ""; } }} />
+          </div>
+          <button className="btn" style={{ marginTop: 8 }} disabled={busy || !mediaStat.bytes} onClick={async () => { const r = await store.pruneMedia(); setMediaMsg(r.files ? `Removed ${r.files.toLocaleString()} pictures no card shows (${(r.bytes / 1048576).toFixed(0)} MB freed).` : "Every stored picture is used by a card."); }}>Remove pictures no card shows</button>
+        </div>
         <label className="row small" style={{ margin: "12px 0 6px" }}><input type="checkbox" checked={s.autoplay} onChange={(e) => store.saveSettings({ autoplay: e.target.checked })} /> Play card sounds automatically (tap ▶ or press R to replay)</label>
         <label className="row small" style={{ margin: "6px 0" }}><input type="checkbox" checked={s.mediaSync} onChange={(e) => store.saveSettings({ mediaSync: e.target.checked })} /> Share images between devices through the sync repository</label>
         <label className="row small" style={{ margin: "6px 0 0" }}><input type="checkbox" checked={s.mediaDownload} onChange={(e) => store.saveSettings({ mediaDownload: e.target.checked })} /> Download shared images on this device</label>

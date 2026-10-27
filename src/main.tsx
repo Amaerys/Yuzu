@@ -1,10 +1,11 @@
+import { setHiddenFields } from "./lib/render";
 import { createRoot } from "react-dom/client";
 import { App } from "./ui/App";
 import { store } from "./lib/store";
 
 import { applyTheme } from "./ui/sfx";
-store.load().then(() => applyTheme(store.settings.theme)).catch(() => { /* shown by the recovery screen */ });
-store.subscribe(() => { if (store.loaded && document.documentElement.dataset.theme !== store.settings.theme) applyTheme(store.settings.theme); });
+store.load().then(() => { applyTheme(store.settings.theme); setHiddenFields(store.settings.hiddenFields ?? []); }).catch(() => { /* shown by the recovery screen */ });
+store.subscribe(() => { if (store.loaded) setHiddenFields(store.settings.hiddenFields ?? []); if (store.loaded && document.documentElement.dataset.theme !== store.settings.theme) applyTheme(store.settings.theme); });
 createRoot(document.getElementById("root")!).render(<App />);
 (window as any).yuzu = store; // for debugging from the console
 

@@ -28,7 +28,7 @@ const local = (s: string) => !/^(https?:|data:|blob:|\/\/)/i.test(s);
 const entity = (s: string) => s.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
 
 /** Every local file name referenced by card content: <img>, <audio>/<source>/<video>, [sound:], CSS url(), and template "_files". */
-export function mediaRefs(notes: Iterable<Note>, notetypes: Iterable<Notetype> = []): Set<string> {
+export function mediaRefs(notes: Iterable<Note>, notetypes: Iterable<Notetype> = [], skipField?: (note: Note, index: number) => boolean): Set<string> {
   const out = new Set<string>();
   const scan = (html: string) => {
     if (!html) return;
@@ -36,7 +36,7 @@ export function mediaRefs(notes: Iterable<Note>, notetypes: Iterable<Notetype> =
     if (html.includes("[sound:")) for (const m of html.matchAll(/\[sound:([^\]]+)\]/g)) out.add(entity(m[1]).trim());
     if (html.includes("url(")) for (const m of html.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/gi)) { const n = dec(entity(m[1])); if (local(n)) out.add(n); }
   };
-  for (const n of notes) for (const f of n.fields) scan(f);
+  for (const n of notes) n.fields.forEach((f, i) => { if (!skipField?.(n, i)) scan(f); });
   for (const nt of notetypes) {
     scan(nt.css);
     for (const t of nt.templates) { scan(t.qfmt); scan(t.afmt); }
@@ -113,10 +113,10 @@ const sec = (ms: number) => { const s = Math.round(ms / 1000); return s < 90 ? `
  * Bring the media that `notes`/`notetypes` reference into the device. `have` skips names already
  * stored (so a stopped import resumes where it left off); `store` persists one file.
  */
-export async function importMedia(input: Blob | File[], notes: Iterable<Note>, have: (name: string) => boolean, store: (name: string, blob: Blob) => Promise<void>, env: MediaEnv, opts: { maxPx?: number; notetypes?: Iterable<Notetype>; parallel?: number } = {}): Promise<MediaImportResult> {
+export async function importMedia(input: Blob | File[], notes: Iterable<Note>, have: (name: string) => boolean, store: (name: string, blob: Blob) => Promise<void>, env: MediaEnv, opts: { maxPx?: number; notetypes?: Iterable<Notetype>; parallel?: number; skipField?: (note: Note, index: number) => boolean } = {}): Promise<MediaImportResult> {
   env.onProgress?.("Reading the file list", 0);
   const src = Array.isArray(input) ? folderSource(input) : await zipSource(input, env);
-  const refs = mediaRefs(notes, opts.notetypes);
+  const refs = mediaRefs(notes, opts.notetypes, opts.skipField);
   const res: MediaImportResult = { stored: 0, images: 0, sounds: 0, other: 0, already: 0, missing: 0, failed: 0, bytes: 0, missingNames: [] };
   const wanted: string[] = [];
   for (const n of refs) {

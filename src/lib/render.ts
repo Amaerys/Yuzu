@@ -11,9 +11,14 @@ export interface RenderCtx {
 
 const clozeRe = /\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g;
 
+/** Fields the user never wants to see (e.g. AnKing's "Sketchy" fields): rendered as empty, so their sections vanish. */
+let hidden = new Set<string>();
+export function setHiddenFields(names: string[]) { hidden = new Set(names.map((n) => n.trim().toLowerCase()).filter(Boolean)); }
+export function isHiddenField(name: string): boolean { return hidden.has(name.trim().toLowerCase()); }
+
 function fieldMap(ctx: RenderCtx): Record<string, string> {
   const m: Record<string, string> = {};
-  ctx.notetype.fields.forEach((f, i) => { m[f] = ctx.note.fields[i] ?? ""; });
+  ctx.notetype.fields.forEach((f, i) => { m[f] = hidden.has(f.trim().toLowerCase()) ? "" : ctx.note.fields[i] ?? ""; });
   return m;
 }
 

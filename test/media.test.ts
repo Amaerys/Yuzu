@@ -86,3 +86,16 @@ test("media: stop halfway keeps what was stored", async () => {
   const r = await importMedia(many, ns, () => false, async () => { if (++n === 10) ac.abort(); }, { ...env, signal: ac.signal }, { parallel: 1 });
   assert.equal(r.stopped, true); assert.equal(r.stored, 10);
 });
+
+test("hidden fields: Sketchy content is not rendered and its pictures are not wanted", async () => {
+  const { renderCard, setHiddenFields } = await import("../src/lib/render.ts");
+  const nt = { id: "ak", name: "AnKingOverhaul", kind: "cloze" as const, css: "", fields: ["Text", "Extra", "Sketchy"], templates: [{ name: "c", qfmt: "{{cloze:Text}}", afmt: "{{cloze:Text}}{{#Extra}}<div id=extra>{{Extra}}</div>{{/Extra}}{{#Sketchy}}<span class=\"hintBtn\" data-name=\"Sketchy\"><div class=\"hints\">{{Sketchy}}</div></span>{{/Sketchy}}" }] };
+  const note = { id: "n", ntid: "ak", guid: "g", fields: ["{{c1::Lynch}} is right-sided", "<img src=\"keep.png\">", "<img src=\"sk1.jpg\"><img src=\"sk2.jpg\">"], tags: [], created: 0, modified: 0 };
+  setHiddenFields(["Sketchy"]);
+  const back = renderCard({ note: note as any, notetype: nt as any, ord: 0 }).back;
+  assert.ok(!/Sketchy|sk1/.test(back)); assert.match(back, /keep\.png/);
+  const refs = mediaRefs([note as any], [nt as any], (n, i) => i === 2);
+  assert.deepEqual([...refs].sort(), ["keep.png"]);
+  setHiddenFields([]);
+  assert.match(renderCard({ note: note as any, notetype: nt as any, ord: 0 }).back, /sk1\.jpg/);
+});
