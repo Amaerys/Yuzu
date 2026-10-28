@@ -20,7 +20,7 @@ if (!watch) { try { execSync("npx tsc --noEmit -p .", { cwd: root, stdio: "inher
 
 const result = await esbuild.build({
   entryPoints: [path.join(root, "src/main.tsx")],
-  bundle: true, minify: !watch, sourcemap: watch ? "inline" : false,
+  bundle: true, minify: !watch && !process.env.YUZU_NOMINIFY, sourcemap: watch ? "inline" : false,
   format: "esm", target: ["es2022", "chrome110", "safari16"],
   jsx: "automatic",
   define: { __VERSION__: JSON.stringify(pkg.version), "process.env.NODE_ENV": JSON.stringify(watch ? "development" : "production") },

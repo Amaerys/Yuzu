@@ -58,21 +58,23 @@ function derive() {
   const queue = store.queue("");
   const counts = store.stateCounts();
   const now = Date.now();
-  const forecast = [0, 1, 2, 3, 4, 5, 6].map((d) => {
-    const start = store.dayStart(now) + d * DAY, end = start + DAY;
-    let n = 0; for (const c of store.cards.values()) if (!c.suspended && c.state === "review" && c.due >= (d === 0 ? 0 : start) && c.due < end) n++;
-    return n;
-  });
+  // Reviews falling due each of the next 7 days; cards already overdue are counted apart (a backlog would flatten the chart).
+  const day0 = store.dayStart(now); const forecast = [0, 0, 0, 0, 0, 0, 0]; let overdue = 0;
+  for (const c of store.cards.values()) {
+    if (c.suspended || c.state !== "review") continue;
+    if (c.due < day0) { overdue++; continue; }
+    const d = Math.floor((c.due - day0) / DAY); if (d < 7) forecast[d]++;
+  }
   const maxF = Math.max(1, ...forecast);
   const top = tree.children.filter((c) => c.due + c.newCount + c.learning > 0).sort((a, b) => b.due - a.due).slice(0, 6);
   const missed = store.missedToday(now); const weakest = store.weakestSystem(now);
   // A boss fight worth offering: a system with 10+ well-learned cards that has not been beaten in the last 14 days.
   const mastery = store.masteryBySystem(now);
   const bossReady = [...mastery].filter(([name, m]) => m.mastered + m.durable >= 10 && (now - (store.settings.bosses[`systems:${name}`]?.at ?? 0)) > 14 * DAY).sort((a, b) => (b[1].mastered + b[1].durable) - (a[1].mastered + a[1].durable)).slice(0, 1).map(([name, m]) => ({ name, ready: m.mastered + m.durable }))[0] ?? null;
-  return { pins, tree, stats, queue, counts, now, forecast, maxF, top, missed, weakest, bossReady };
+  return { pins, tree, stats, queue, counts, now, forecast, maxF, overdue, top, missed, weakest, bossReady };
 }
 
-function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, top, missed, weakest, bossReady, onStudy, onInbox, onSearch, onBoss }: ReturnType<typeof derive> & { onStudy: OnStudy; onInbox?: () => void; onSearch?: (q: string) => void; onBoss?: (path: string, view: View, name: string) => void }) {
+function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, overdue, top, missed, weakest, bossReady, onStudy, onInbox, onSearch, onBoss }: ReturnType<typeof derive> & { onStudy: OnStudy; onInbox?: () => void; onSearch?: (q: string) => void; onBoss?: (path: string, view: View, name: string) => void }) {
   const [q, setQ] = useState("");
   const goalDone = stats.today >= stats.goal && stats.goal > 0;
   return (
@@ -121,6 +123,7 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, top,
             </>
           )}
           <h2>Next 7 days</h2>
+          <p className="small muted" style={{ margin: "-4px 0 8px" }}>Reviews falling due each day, so you see heavy days coming.{overdue > 0 ? <> Plus <b style={{ color: "var(--orange)" }}>{overdue.toLocaleString()} overdue</b>: about <b>{Math.ceil(overdue / 7).toLocaleString()} extra a day</b> clears them in a week.</> : null}</p>
           <div className="card-box forecast" style={{ height: 108 }}>
             {forecast.map((n, i) => (
               <div key={i} className={i === 0 ? "today" : ""}>

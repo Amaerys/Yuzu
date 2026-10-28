@@ -147,17 +147,34 @@ export function CardInfo({ card, onClose, onSaved, onTag }: { card: Card; onClos
   );
 }
 
-export type StudyScope = { path: string; view?: View; only?: "all" | "due" | "new"; preset?: Card[]; title?: string };
+export type StudyScope = { path: string; view?: View; only?: "all" | "due" | "new"; preset?: Card[]; title?: string; resume?: SavedSession };
 
-export function Study({ path, view = "decks", only = "all", preset, title, onExit, onBrowseTag }: StudyScope & { onExit: () => void; onBrowseTag?: (tag: string) => void }) {
-  const fullQueue = useMemo(() => preset ?? store.queue(path, Date.now(), view, only), [path, view, only]);
-  const [plan, setPlan] = useState<number | null>(preset || fullQueue.length <= 15 ? fullQueue.length : null);
-  const startedAt = useRef(Date.now());
-  const [results, setResults] = useState<{ id: string; g: Rating; ms: number }[]>([]);
+/** A study session saved as it goes, so a refresh (or Android reloading the app in the background) picks it up again. */
+export interface SavedSession { scope: { path: string; view?: View; only?: "all" | "due" | "new"; title?: string }; ids: string[]; idx: number; plan: number | null; done: number; results: { id: string; g: Rating; ms: number }[]; startedAt: number; savedAt: number }
+const SESSION_KEY = "yuzu-session";
+export function loadSession(): SavedSession | null {
+  try { const s = JSON.parse(localStorage.getItem(SESSION_KEY) ?? "null") as SavedSession | null; return s && Date.now() - s.savedAt < 6 * 3600000 && s.idx < s.ids.length ? s : null; } catch { return null; }
+}
+function saveSession(s: SavedSession | null) { try { if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s)); else localStorage.removeItem(SESSION_KEY); } catch { /* storage unavailable: sessions just don't survive a reload */ } }
+
+export function Study({ path, view = "decks", only = "all", preset, title, resume, onExit: exit, onBrowseTag }: StudyScope & { onExit: () => void; onBrowseTag?: (tag: string) => void }) {
+  // Resuming: the same cards in the same order, minus any deleted meanwhile (cards are re-read, so their schedule is current).
+  const resumed = useMemo(() => (resume ? resume.ids.map((id) => store.cards.get(id)).filter((c): c is Card => !!c) : null), []);
+  const fullQueue = useMemo(() => resumed ?? preset ?? store.queue(path, Date.now(), view, only), [path, view, only]);
+  const [plan, setPlan] = useState<number | null>(resume ? resume.plan : preset || fullQueue.length <= 15 ? fullQueue.length : null);
+  const startedAt = useRef(resume?.startedAt ?? Date.now());
+  const [results, setResults] = useState<{ id: string; g: Rating; ms: number }[]>(resume?.results ?? []);
   const [queue, setQueue] = useState<Card[]>(fullQueue);
-  const [idx, setIdx] = useState(0);
+  const [idx, setIdx] = useState(resume ? Math.min(resume.idx, Math.max(0, fullQueue.length - (resume.ids.length - resume.idx))) : 0);
   const [showAnswer, setShowAnswer] = useState(false);
-  const [doneCount, setDoneCount] = useState(0);
+  const [doneCount, setDoneCount] = useState(resume?.done ?? 0);
+  const onExit = () => { saveSession(null); exit(); };
+  // Save the session after every step (cheap: ids only). Cleared on exit and when the session is finished.
+  useEffect(() => {
+    if (plan === null) return;
+    if (idx >= queue.length) { saveSession(null); return; }
+    saveSession({ scope: { path, view, only, title }, ids: queue.map((c) => c.id), idx, plan, done: doneCount, results, startedAt: startedAt.current, savedAt: Date.now() });
+  }, [queue, idx, plan, doneCount, results]);
   const [toast, setToast] = useState("");
   const [info, setInfo] = useState(false);
   const [rev, setRev] = useState(0);

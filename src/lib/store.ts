@@ -127,6 +127,7 @@ export class Store {
   mediaWants: Record<string, MediaWant> = {};
   sendNote = ""; // last word from the sender (e.g. "phone needs 47,000 files — use the phone media file once")
   private ankiList: ((n: string) => string | undefined) | null = null;
+  private lastWantsKey = "";
   private listeners = new Set<Listener>();
   private version = 0;
   private treeCache = new Map<View, { v: number; tree: TreeNode }>();
@@ -241,7 +242,10 @@ export class Store {
         const wants: Record<string, MediaWant> = { ...(await db.getMeta<Record<string, MediaWant>>("mediaWants", {})), ...(got?.mediaWants ?? {}) };
         for (const [k, w] of Object.entries(wants)) if (!w.id || (k !== me && !inRepo.has(wantPath(k)))) delete wants[k]; // (lists from the first version had no id)
         const dir = await this.ankiFolder();
-        if (this.settings.mediaDownload && !dir) {
+        const wantsKey = this.settings.mediaDownload && !dir ? `${this.refsKey()}|${this.media.size}|${Object.keys(mediaIndex).length}|${myName}` : "";
+        if (this.settings.mediaDownload && !dir && wants[me] && wantsKey === this.lastWantsKey) { /* nothing changed: keep the list as it is */ }
+        else if (this.settings.mediaDownload && !dir) {
+          this.lastWantsKey = wantsKey;
           const miss: string[] = []; let total = 0;
           for (const r of this.mediaRefs()) if (!this.media.has(r) && !mediaIndex[r] && !/\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(r)) { total++; if (miss.length < 20000) miss.push(r); }
           const prev = wants[me]; if (!prev || prev.total !== total || prev.device !== myName) wants[me] = { id: me, device: myName, at: Date.now(), total, missing: miss };
@@ -268,7 +272,7 @@ export class Store {
           await db.setMeta("syncKnown", res.manifest.files); await db.setMeta("syncSeenAt", res.manifest.updatedAt); await db.setMeta("mediaIndex", mediaIndex); await db.setMeta("mediaWants", wants);
           // Shared images missing here: fetch a batch now; the rest on the next sync.
           if (this.settings.mediaDownload) {
-            const used = this.mediaRefs(); const missing = Object.entries(mediaIndex).filter(([name, v]) => v.p && used.has(name) && !this.media.has(name)); let budget = MEDIA_BATCH_BYTES, done = 0; const got2: { name: string; blob: Blob }[] = [];
+            const waiting = Object.entries(mediaIndex).filter(([name, v]) => v.p && !this.media.has(name)); const used = waiting.length ? this.mediaRefs() : null; const missing = waiting.filter(([name]) => used!.has(name)); let budget = MEDIA_BATCH_BYTES, done = 0; const got2: { name: string; blob: Blob }[] = [];
             const q = missing.filter(([, v]) => { if (budget - v.s < 0) return false; budget -= v.s; return true; });
             await Promise.all(Array.from({ length: 4 }, async () => { while (q.length) { const [name, v] = q.shift()!; try { const bytes = await gh.readBinary(v.p); if (bytes) { const blob = new Blob([bytes as BlobPart], { type: v.p.endsWith(".webp") ? "image/webp" : mimeFor(name) }); this.media.set(name, blob); got2.push({ name, blob }); } } catch { /* next time */ } progress(`Downloading images ${++done}/${q.length + done}`); } }));
             if (got2.length) { await db.putMany("media", got2); this.mediaUrls.clear(); }
@@ -429,6 +433,7 @@ export class Store {
       // Leaving the app: push unsynced changes right away (the 8 s debounce would otherwise lose the last reviews
       // if the phone kills the tab). Coming back: pull what other devices did.
       setTimeout(() => { this.autoMaster().catch(() => {}); }, 3000); // retire cards past 20 years (after start-up settles)
+      db.getMeta<{ key: string; names: string[] } | null>("mediaRefs", null).then((r) => { if (r && !this.savedRefs) this.savedRefs = r; }).catch(() => {});
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "hidden") { if (this.dirty && this.syncConfigured()) { if (this.syncTimer) clearTimeout(this.syncTimer); this.syncTimer = null; this.sync("hidden").catch(() => {}); } }
         else this.scheduleSync(this.dirty ? 500 : 2000);
@@ -792,13 +797,21 @@ export class Store {
   }
   /** Media the cards reference vs what this device holds. */
   private refsCache: { key: string; refs: Set<string> } | null = null;
-  mediaRefs(): Set<string> {
-    // Re-scan only when card text can have changed: a cheap fingerprint of every note's edit time (a review or flag
-    // bumps the version but changes no fields — re-scanning 100k notes for that cost ~0.4 s on a PC, more on a phone).
+  /** Fingerprint of everything media references depend on: every note's edit time, the note types, the hidden fields. Cheap (no regexes). */
+  refsKey(): string {
     let sig = 0; for (const n of this.notes.values()) sig = (sig + n.modified + n.fields.length) % 1e15;
     let ntSig = 0; for (const nt of this.notetypes.values()) ntSig += nt.css.length + nt.templates.length;
-    const key = `${this.notes.size}:${sig}:${this.notetypes.size}:${ntSig}:${this.settings.hiddenFields.join("|")}`;
-    if (this.refsCache?.key !== key) this.refsCache = { key, refs: mediaRefs(this.notes.values(), this.notetypes.values(), this.skipHidden()) };
+    return `${this.notes.size}:${sig}:${this.notetypes.size}:${ntSig}:${this.settings.hiddenFields.join("|")}`;
+  }
+  private savedRefs: { key: string; names: string[] } | null = null; // the last scan, kept in the database across launches
+  mediaRefs(): Set<string> {
+    // Re-scan only when card text can have changed (a review or flag changes no fields). The result is also kept in the
+    // database, so a fresh launch — Android often restarts the app in the background — doesn't re-scan 100k notes.
+    const key = this.refsKey();
+    if (this.refsCache?.key === key) return this.refsCache.refs;
+    if (this.savedRefs?.key === key) { this.refsCache = { key, refs: new Set(this.savedRefs.names) }; return this.refsCache.refs; }
+    this.refsCache = { key, refs: mediaRefs(this.notes.values(), this.notetypes.values(), this.skipHidden()) };
+    const names = [...this.refsCache.refs]; this.savedRefs = { key, names }; db.setMeta("mediaRefs", { key, names }).catch(() => {});
     return this.refsCache.refs;
   }
   mediaStatus(): { total: number; stored: number; bytes: number; images: { total: number; stored: number }; sounds: { total: number; stored: number }; missing: string[] } {

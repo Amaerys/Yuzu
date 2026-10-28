@@ -51,7 +51,8 @@ export type Progress = (message: string) => void;
 export const NOTE_SHARDS = 128, CARD_SHARDS = 256;
 /** Files above this size are stored gzip-compressed (".gz" suffix) so one review uploads kilobytes, not megabytes. */
 export const GZIP_ABOVE = 32 * 1024;
-const shardOf = (id: string, n: number) => { let h = 0; for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0; return h % n; };
+const shardMemo = new Map<string, number>(); // id → hash (ids never change; saves hashing 250k ids on every sync)
+const shardOf = (id: string, n: number) => { let h = shardMemo.get(id); if (h === undefined) { h = 0; for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0; if (shardMemo.size < 2_000_000) shardMemo.set(id, h); } return h % n; };
 const enc = new TextEncoder();
 
 export async function sha256(s: string): Promise<string> {

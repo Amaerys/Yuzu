@@ -3,7 +3,7 @@ import { store, type View } from "../lib/store";
 import { Today } from "./Today";
 import { Library } from "./Library";
 import { Settings } from "./Settings";
-import { Study, type StudyScope } from "./Study";
+import { Study, loadSession, type StudyScope } from "./Study";
 import { IconToday, IconLibrary, IconProgress, IconSettings, YuzuMark } from "./icons";
 import { Progress } from "./Progress";
 import { Boss } from "./Boss";
@@ -70,7 +70,8 @@ export function App() { return <ErrorBoundary><AppInner /></ErrorBoundary>; }
 function AppInner() {
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
   const [tab, setTab] = useState<Tab>("today");
-  const [study, setStudy] = useState<(StudyScope & { boss?: string }) | null>(null);
+  // A session interrupted by a reload comes back where it was.
+  const [study, setStudy] = useState<(StudyScope & { boss?: string }) | null>(() => { const r = loadSession(); return r ? { ...r.scope, path: r.scope.path, resume: r } : null; });
   const startStudy = (path: string, view: View = "decks", extra: Partial<StudyScope> = {}) => setStudy({ path, view, ...extra });
   const startBoss = (path: string, view: View, name: string) => setStudy({ path, view, boss: name });
   const [update, setUpdate] = useState<(() => void) | null>(null);
