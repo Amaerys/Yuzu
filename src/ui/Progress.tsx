@@ -2,7 +2,8 @@ import { store } from "../lib/store";
 import { fmtDate } from "../lib/dates";
 import { DAY } from "../scheduler/fsrs";
 import { systemColor } from "./theme";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 
 const MASTERY: { key: "durable" | "mastered" | "developing" | "learning"; label: string; color: string }[] = [
   { key: "durable", label: "durable", color: "var(--yuzu)" }, { key: "mastered", label: "mastered", color: "var(--orange)" },
@@ -67,6 +68,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
   return (
     <div className="screen">
       <h1>Progress</h1>
+      <Mastered />
       <div className="stat-grid">
         <div className="stat"><b>{stats.streak}</b><span>day streak</span></div>
         <div className="stat"><b>{retention === null ? "–" : retention + "%"}</b><span>retention, 30 days</span></div>
@@ -108,6 +110,68 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
           <div className="bar" style={{ margin: 0, height: 6 }}><i style={{ width: `${c.pct}%`, background: "var(--orange)" }} /></div>
         </div>
       ))}
+    </div>
+  );
+}
+
+const yrs = (d: number) => `${(d / 365.25).toFixed(d < 3650 ? 1 : 0)} y`;
+/** Retiring cards: >5 years to the next review → offered here; >20 years → retired on their own. Both go to the log. */
+function Mastered() {
+  const v = store.getVersion();
+  const cands = useMemo(() => store.masteryCandidates(), [v]);
+  const log = store.mastery.log;
+  const [open, setOpen] = useState<"list" | "log" | null>(null);
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [q, setQ] = useState("");
+  if (!cands.length && !log.length) return null;
+  const toggle = (id: string) => setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const shownLog = [...log].reverse().filter((e) => !q || (e.front + " " + e.back + " " + e.deck).toLowerCase().includes(q.toLowerCase()));
+  return (
+    <div className="card-box" style={{ marginBottom: 14 }}>
+      <b>Mastered</b>
+      <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+        {cands.length > 0 && <button className="btn primary" onClick={() => { setSel(new Set(cands.map((c) => c.id))); setOpen("list"); }}>{cands.length.toLocaleString()} ready to retire</button>}
+        {log.length > 0 && <button className="btn" onClick={() => setOpen("log")}>Log · {log.length.toLocaleString()}</button>}
+      </div>
+      <p className="small muted" style={{ margin: "8px 0 0" }}>Next review more than 5 years away: you decide here. More than 20 years: retired automatically. “I've mastered this” in a card's ⋯ menu retires it right away. Retired cards are deleted (their pictures too) and kept in the log.</p>
+      {open === "list" && createPortal(
+        <div className="sheet-backdrop" onClick={() => setOpen(null)}><div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxHeight: "85vh", overflow: "auto" }}>
+          <b>{cands.length.toLocaleString()} cards next due in more than 5 years</b>
+          <p className="small muted">Ticked cards are retired: deleted, with their question and answer kept in the Mastered log. “Keep studying” takes them off this list for good.</p>
+          <div className="row" style={{ gap: 8, margin: "6px 0" }}>
+            <button className="btn" onClick={() => setSel(new Set(cands.map((c) => c.id)))}>All</button>
+            <button className="btn" onClick={() => setSel(new Set())}>None</button>
+          </div>
+          <ul className="retire-list" style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {cands.slice(0, 500).map((c) => { const t = store.cardText(c); return (
+              <li key={c.id} style={{ padding: "8px 0", borderBottom: "1px dashed var(--line)" }}>
+                <label className="row" style={{ alignItems: "flex-start", gap: 10 }}>
+                  <input type="checkbox" checked={sel.has(c.id)} onChange={() => toggle(c.id)} style={{ marginTop: 4 }} />
+                  <span className="grow"><span className="small muted">{c.source.split("::").slice(-2).join(" › ")} · next in {yrs(store.intervalDays(c))} · {c.reps} reviews{c.lapses ? `, ${c.lapses} lapses` : ""}</span><br />{t.front || "(no text)"}{t.back ? <><br /><span className="muted">→ {t.back}</span></> : null}</span>
+                </label>
+              </li>); })}
+            {cands.length > 500 && <li className="small muted">… and {(cands.length - 500).toLocaleString()} more (“All” includes them)</li>}
+          </ul>
+          <div className="row" style={{ gap: 8, marginTop: 10, position: "sticky", bottom: 0, background: "var(--ink-2)", paddingTop: 8 }}>
+            <button className="btn primary grow" disabled={!sel.size} onClick={async () => { if (!confirm(`Retire ${sel.size.toLocaleString()} card${sel.size === 1 ? "" : "s"} as mastered? They are deleted; the log keeps what they said.`)) return; await store.masterCards([...sel], "you"); setSel(new Set()); setOpen(null); }}>Mark mastered ({sel.size.toLocaleString()})</button>
+            <button className="btn grow" disabled={!sel.size} onClick={async () => { await store.keepCards([...sel]); setSel(new Set()); setOpen(null); }}>Keep studying</button>
+          </div>
+        </div></div>, document.body
+      )}
+      {open === "log" && createPortal(
+        <div className="sheet-backdrop" onClick={() => setOpen(null)}><div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxHeight: "85vh", overflow: "auto" }}>
+          <b>Mastered log · {log.length.toLocaleString()} cards</b>
+          <input placeholder="Search the log" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: "100%", margin: "8px 0", background: "var(--ink-3)", color: "var(--text)", border: "2px solid var(--line)", padding: "8px 10px", font: "inherit" }} />
+          <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {shownLog.slice(0, 300).map((e) => (
+              <li key={e.id + e.at} style={{ padding: "8px 0", borderBottom: "1px dashed var(--line)" }}>
+                <span className="small muted">{fmtDate(e.at)} · {e.by === "auto" ? "retired automatically" : "marked by you"} · {e.deck.split("::").slice(-2).join(" › ")} · was next in {yrs(e.intervalDays)} · {e.reps} reviews{e.lapses ? `, ${e.lapses} lapses` : ""}{e.firstReview ? ` · learning since ${fmtDate(e.firstReview)}` : ""}</span><br />
+                {e.front}{e.back ? <><br /><span className="muted">→ {e.back}</span></> : null}
+              </li>))}
+            {shownLog.length > 300 && <li className="small muted">… {(shownLog.length - 300).toLocaleString()} more — search to narrow</li>}
+          </ul>
+        </div></div>, document.body
+      )}
     </div>
   );
 }

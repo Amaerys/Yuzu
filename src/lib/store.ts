@@ -10,7 +10,7 @@ import { stamp, observe } from "./clock";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
 import { writeZip, streamZip, ZipParts } from "./zipwrite";
-import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
+import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
 export interface Settings {
   newPerDay: number;
@@ -203,6 +203,11 @@ export class Store {
             const { sync: _s, deviceName: _d, nightCards: _n, swipe: _w, typeAnswers: _t, mediaDownload: _m, theme: _th, sfx: _sf, autoplay: _ap, cardStyle: _cs, ...rest } = got.settings as any; // per-device fields stay local
             this.settings = { ...this.settings, ...rest }; await db.setMeta("settings", this.settings);
           }
+          if (got.mastery) {
+            const ids = new Set(this.mastery.log.map((e) => e.id)); const log = [...this.mastery.log, ...got.mastery.log.filter((e) => !ids.has(e.id))];
+            const kept = { ...this.mastery.kept }; for (const [k, v] of Object.entries(got.mastery.kept ?? {})) kept[k] = Math.max(kept[k] ?? 0, v);
+            this.mastery = { log, kept }; await db.setMeta("mastery", this.mastery);
+          }
           if (got.hooks) { let changed = false; const merged = { ...this.hooks }; for (const [k, v] of Object.entries(got.hooks as typeof this.hooks)) if ((merged[k]?.m ?? -1) < v.m) { merged[k] = v; changed = true; } if (changed) { this.hooks = merged; await db.setMeta("hooks", merged); } }
           if (got.media) { const blobs: { name: string; blob: Blob }[] = []; for (const [name, url] of Object.entries(got.media as Record<string, string>)) { if (this.media.has(name)) continue; const blob = await (await fetch(url)).blob(); this.media.set(name, blob); blobs.push({ name, blob }); } if (blobs.length) { await db.putMany("media", blobs); this.mediaUrls.clear(); } }
           if (pulledN + pulledC + pulledR) this.treeCache.clear();
@@ -238,7 +243,7 @@ export class Store {
         progress("Preparing upload");
         if (!this.shardCache.size) { const saved = await db.getMeta<[string, { fp: string; hash: string }][]>("shardCache", []); for (const [k, v] of saved) this.shardCache.set(k, v); }
         const { hashes, make } = await GitHubSync.shard({
-          notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(), mediaIndex, mediaWants: wants, hooks: this.hooks,
+          notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(), mediaIndex, mediaWants: wants, mastery: this.mastery, hooks: this.hooks,
           settings: { ...this.settings, sync: undefined, updatedAt: (this.settings as any).updatedAt ?? 0 },
         }, this.shardCache);
         try {
@@ -285,6 +290,7 @@ export class Store {
       }
       this.log(true, summary, Date.now() - t0);
       this.setSync("ok", summary);
+      this.autoMaster().catch(() => {});
       this.bump();
     } catch (e: any) {
       if (e instanceof SyncError && e.kind === "ratelimit" && e.resumeAt) { this.pausedUntil = e.resumeAt; this.scheduleSync(Math.max(60000, e.resumeAt - Date.now() + 5000)); }
@@ -389,6 +395,7 @@ export class Store {
     this.inbox = await db.getMeta<typeof this.inbox>("inbox", []);
     this.undoStack = await db.getMeta<typeof this.undoStack>("undoStack", []);
     this.hooks = await db.getMeta<typeof this.hooks>("hooks", {});
+    this.mastery = await db.getMeta<typeof this.mastery>("mastery", { log: [], kept: {} });
     this.packLog = await db.getMeta<typeof this.packLog>("packLog", []);
     this.mergeLog = await db.getMeta<typeof this.mergeLog>("mergeLog2", []);
     this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) } };
@@ -408,6 +415,7 @@ export class Store {
       setInterval(() => { if (document.visibilityState === "visible" && this.syncConfigured() && this.settings.sync.auto && this.syncStatus.state !== "syncing") this.sync("poll").catch(() => {}); }, 5 * 60000);
       // Leaving the app: push unsynced changes right away (the 8 s debounce would otherwise lose the last reviews
       // if the phone kills the tab). Coming back: pull what other devices did.
+      setTimeout(() => { this.autoMaster().catch(() => {}); }, 3000); // retire cards past 20 years (after start-up settles)
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "hidden") { if (this.dirty && this.syncConfigured()) { if (this.syncTimer) clearTimeout(this.syncTimer); this.syncTimer = null; this.sync("hidden").catch(() => {}); } }
         else this.scheduleSync(this.dirty ? 500 : 2000);
@@ -645,6 +653,50 @@ export class Store {
     await this.persist("restoring", (async () => { await db.putMany("notes", notes); await db.putMany("cards", cards); await db.setMeta("tombstones", this.tombstones); })());
     this.treeCache.clear(); this.bump(); this.touch(); return notes.length;
   }
+  // ---- Mastery: retire cards whose next review is years away ----------------------------------------
+  mastery: { log: MasteredEntry[]; kept: Record<string, number> } = { log: [], kept: {} };
+  static MASTER_AUTO_DAYS = 20 * 365.25; static MASTER_ASK_DAYS = 5 * 365.25;
+  /** Days from the last review to the next one (0 for cards not in review). */
+  intervalDays(c: Card) { return c.state === "review" && c.lastReview ? (c.due - c.lastReview) / 86400000 : 0; }
+  /** Cards whose next review is more than 5 years away (and under the 20-year automatic line), not kept, not paused. */
+  masteryCandidates(): Card[] {
+    const out: Card[] = [];
+    for (const c of this.cards.values()) { const d = this.intervalDays(c); if (d > Store.MASTER_ASK_DAYS && !c.suspended && !this.mastery.kept[c.id]) out.push(c); }
+    return out.sort((a, b) => this.intervalDays(b) - this.intervalDays(a));
+  }
+  /** What a card asks and answers, as plain text (cloze: this card's gap shown as […], the answer separately). */
+  cardText(c: Card): { front: string; back: string } {
+    const n = this.notes.get(c.nid); if (!n) return { front: "", back: "" };
+    const plain = (h: string) => h.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<br\s*\/?>|<\/(div|p|li)>/gi, " ").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\[sound:[^\]]+\]/g, "").replace(/\s+/g, " ").trim();
+    const all = n.fields.join(" ");
+    if (/\{\{c\d+::/.test(all)) {
+      const k = c.ord + 1; const answers: string[] = []; const txt = n.fields.find((f) => new RegExp(`\\{\\{c${k}::`).test(f)) ?? n.fields[0];
+      const front = txt.replace(/\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g, (_m, num, ans, hint) => { if (+num === k) { answers.push(ans); return hint ? `[${hint}]` : "[…]"; } return ans; });
+      return { front: plain(front).slice(0, 400), back: plain(answers.join(" · ")).slice(0, 300) };
+    }
+    return { front: plain(n.fields[0] ?? "").slice(0, 400), back: plain(n.fields[1] ?? "").slice(0, 300) };
+  }
+  /** Retire cards as mastered: log what they were, then delete them (the note goes when its last card goes). Synced. */
+  async masterCards(ids: string[], by: "auto" | "you") {
+    const now = stamp(); const entries: MasteredEntry[] = []; const delCards: string[] = [], delNotes: string[] = [];
+    for (const id of ids) {
+      const c = this.cards.get(id); if (!c) continue; const n = this.notes.get(c.nid); const t = this.cardText(c);
+      const first = this.reviews.find((r) => r.cid === id)?.ts ?? 0;
+      entries.push({ id, nid: c.nid, deck: c.source, front: t.front, back: t.back, tags: (n?.tags ?? []).filter((x) => !x.startsWith("auto::")).slice(0, 12), reps: c.reps, lapses: c.lapses, firstReview: first, lastReview: c.lastReview, intervalDays: Math.round(this.intervalDays(c)), at: now, by });
+      this.cards.delete(id); this.tombstones["c:" + id] = now; delCards.push(id);
+      if (n && this.cardsOfNote(n.id).length === 0) { this.notes.delete(n.id); this.tombstones["n:" + n.id] = now; delNotes.push(n.id); }
+    }
+    if (!entries.length) return 0;
+    this.mastery = { ...this.mastery, log: [...this.mastery.log, ...entries] };
+    await this.persist("retiring mastered cards", (async () => { await db.deleteMany("cards", delCards); if (delNotes.length) await db.deleteMany("notes", delNotes); await db.setMeta("tombstones", this.tombstones); await db.setMeta("mastery", this.mastery); })());
+    this.treeCache.clear(); this.bump(); this.touch();
+    this.pruneMedia().catch(() => {}); // free the pictures and sounds only these cards used
+    return entries.length;
+  }
+  /** "Keep studying these": they leave the list for good. */
+  async keepCards(ids: string[]) { const kept = { ...this.mastery.kept }; const now = stamp(); for (const id of ids) kept[id] = now; this.mastery = { ...this.mastery, kept }; await this.persist("saving", db.setMeta("mastery", this.mastery)); this.bump(); this.touch(); }
+  /** Cards past 20 years retire on their own (run at start and after a sync, never mid-session so ↶ still works). */
+  async autoMaster() { const recent = Date.now() - 3600000; const ids = [...this.cards.values()].filter((c) => this.intervalDays(c) > Store.MASTER_AUTO_DAYS && c.lastReview < recent).map((c) => c.id); return ids.length ? this.masterCards(ids, "auto") : 0; }
   /** Remove every note a pack added (cards and history go with them). */
   async removePack(id: string) {
     const e = this.packLog.find((x) => x.id === id); if (!e) return 0;
