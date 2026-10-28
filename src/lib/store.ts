@@ -10,7 +10,7 @@ import { stamp, observe } from "./clock";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
 import { writeZip, streamZip, ZipParts } from "./zipwrite";
-import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
+import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, type ImproveMark, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
 export interface Settings {
   newPerDay: number;
@@ -213,6 +213,7 @@ export class Store {
             const kept = { ...this.mastery.kept }; for (const [k, v] of Object.entries(got.mastery.kept ?? {})) kept[k] = Math.max(kept[k] ?? 0, v);
             this.mastery = { log, kept }; await db.setMeta("mastery", this.mastery);
           }
+          if (got.improve) { let changed = false; const merged = { ...this.improve }; for (const [k, v] of Object.entries(got.improve)) if ((merged[k]?.m ?? -1) < v.m) { merged[k] = v; changed = true; } if (changed) { this.improve = merged; await db.setMeta("improve", merged); } }
           if (got.hooks) { let changed = false; const merged = { ...this.hooks }; for (const [k, v] of Object.entries(got.hooks as typeof this.hooks)) if ((merged[k]?.m ?? -1) < v.m) { merged[k] = v; changed = true; } if (changed) { this.hooks = merged; await db.setMeta("hooks", merged); } }
           if (got.media) { const blobs: { name: string; blob: Blob }[] = []; for (const [name, url] of Object.entries(got.media as Record<string, string>)) { if (this.media.has(name)) continue; const blob = await (await fetch(url)).blob(); this.media.set(name, blob); blobs.push({ name, blob }); } if (blobs.length) { await db.putMany("media", blobs); this.mediaUrls.clear(); } }
           if (pulledN + pulledC + pulledR) this.treeCache.clear();
@@ -251,7 +252,7 @@ export class Store {
         progress("Preparing upload"); const editsAtSnapshot = this.edits;
         if (!this.shardCache.size) { const saved = await db.getMeta<[string, { fp: string; hash: string }][]>("shardCache", []); for (const [k, v] of saved) this.shardCache.set(k, v); }
         const { hashes, make } = await GitHubSync.shard({
-          notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(), mediaIndex, mediaWants: wants, mastery: this.mastery, hooks: this.hooks,
+          notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(), mediaIndex, mediaWants: wants, mastery: this.mastery, improve: this.improve, hooks: this.hooks,
           settings: { ...this.settings, sync: undefined, updatedAt: (this.settings as any).updatedAt ?? 0 },
         }, this.shardCache);
         try {
@@ -403,6 +404,7 @@ export class Store {
     this.inbox = await db.getMeta<typeof this.inbox>("inbox", []);
     this.undoStack = await db.getMeta<typeof this.undoStack>("undoStack", []);
     this.hooks = await db.getMeta<typeof this.hooks>("hooks", {});
+    this.improve = await db.getMeta<typeof this.improve>("improve", {});
     this.mastery = await db.getMeta<typeof this.mastery>("mastery", { log: [], kept: {} });
     this.packLog = await db.getMeta<typeof this.packLog>("packLog", []);
     this.mergeLog = await db.getMeta<typeof this.mergeLog>("mergeLog2", []);
@@ -592,6 +594,9 @@ export class Store {
     this.mergeLog = [...log.map((e, i) => ({ at: now + i, keep: e.keep, dropped: e.dropped, cards: e.cards, keepBefore: keepSnap.get(e.keep)!.note, keepCardsBefore: keepSnap.get(e.keep)!.cards })), ...this.mergeLog].slice(0, 1000);
     await db.setMeta("mergeLog2", this.mergeLog);
     this.bump(); this.touch();
+    // 6a. Marks "needs improving" on the notes this file dealt with are cleared.
+    const dealt = [...new Set([...(c.edits ?? []).map((e) => e.id), ...(c.suspend ?? []), ...((c as any).resolved ?? [])])].filter((id) => this.improve[id]?.r.length || this.notes.get(id)?.tags.includes("ask-claude"));
+    if (dealt.length) await this.clearImprove(dealt);
     // 6. card packs carried in the same file (new cards, placed by their own category)
     const packMsgs: string[] = [];
     for (const [i, p] of (c.packs ?? []).entries()) { onProgress?.(`Adding cards (${i + 1}/${c.packs!.length})`, 0.9 + (0.1 * i) / c.packs!.length); packMsgs.push(`${(p as any)?.name ?? "Pack"}: ${await this.importPack(p)}.`); }
@@ -607,6 +612,42 @@ export class Store {
     this.hooks = { ...this.hooks, [nid]: { t, m: stamp() } }; // an empty text is kept as a tombstone so the deletion syncs
     await this.persist("saving your note", db.setMeta("hooks", this.hooks));
     this.bump(); this.touch();
+  }
+
+  // ---- "needs improving": cards the user wants Claude to rewrite or split ----------
+  improve: Record<string, ImproveMark> = {};
+  static IMPROVE_REASONS: Record<string, string> = { split: "Too much on one card — split it", unclear: "Unclear question or answer", wrong: "Wrong or outdated", format: "Messy formatting", media: "Picture/sound problem", confusion: "I mix it up with something similar", other: "Something else" };
+  improveFor(nid: string): ImproveMark | null { const m = this.improve[nid]; return m && m.r.length ? m : null; }
+  /** Notes marked for improving (plus leeches marked "mixed up with something similar"), newest first. */
+  improveList(): { note: Note; mark: ImproveMark }[] {
+    const out: { note: Note; mark: ImproveMark }[] = []; const seen = new Set<string>();
+    for (const [nid, m] of Object.entries(this.improve)) { const n = this.notes.get(nid); if (n && m.r.length) { out.push({ note: n, mark: m }); seen.add(nid); } }
+    for (const n of this.notes.values()) if (!seen.has(n.id) && n.tags.includes("ask-claude")) out.push({ note: n, mark: { r: ["confusion"], t: "", m: n.modified } });
+    return out.sort((a, b) => b.mark.m - a.mark.m);
+  }
+  async markImprove(nids: string[], reasons: string[], text = "") {
+    const now = stamp(); const next = { ...this.improve };
+    for (const nid of nids) next[nid] = { r: reasons, t: text.trim(), m: now }; // empty reasons = cleared (kept so the clearing syncs)
+    this.improve = next; await this.persist("saving the mark", db.setMeta("improve", next)); this.bump(); this.touch();
+  }
+  /** Clear marks (and the leech "ask-claude" tag) for notes Claude has dealt with. */
+  async clearImprove(nids: string[]) {
+    const now = stamp(); const next = { ...this.improve }; let n = 0;
+    for (const nid of nids) { if (next[nid]?.r.length) { next[nid] = { r: [], t: "", m: now }; n++; } const note = this.notes.get(nid); if (note?.tags.includes("ask-claude")) { const m = { ...note, tags: note.tags.filter((t) => t !== "ask-claude"), modified: now }; this.notes.set(nid, m); await db.putOne("notes", m); n++; } }
+    this.improve = next; await this.persist("saving", db.setMeta("improve", next)); this.bump(); this.touch(); return n;
+  }
+  /** Everything Claude needs to rewrite or split the marked cards: full field HTML (picture/sound tags in place), note type, deck, reasons. */
+  improveExport() {
+    const list = this.improveList(); const byNote = this.cardsByNote(); const dmy = ((d) => `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`)(new Date());
+    return {
+      yuzu_improve: 1, exported: dmy, count: list.length,
+      for_claude: "Improve these flashcards and send back ONE Yuzu curation file (JSON): {\"yuzu_curation\":1, \"name\":\"…\", \"edits\":[{\"id\":noteId, \"fields\":{\"0\":html,…}}], \"packs\":[{\"yuzu_pack\":1, \"id\":\"improve-<date>\", \"name\":\"…\", \"cards\":[{\"id\", \"type\":\"cloze\"|\"basic\", \"text\"|\"front\"/\"back\", \"extra\", \"category\":deck}]}], \"suspend\":[noteIds], \"resolved\":[noteIds]}. Rules: an edit keeps the note's review history, so for cloze notes keep exactly the same cloze numbers; keep every <img> and [sound:] tag (same file names) and put each with the fact it illustrates — when splitting, move a picture onto the new card it belongs to (new pack cards may use <img src=\"same-name.jpg\">); one fact per card; context first; check doses and guidelines against current sources; list every handled note id in resolved.",
+      reasons: Store.IMPROVE_REASONS,
+      cards: list.map(({ note, mark }) => { const nt = this.notetypes.get(note.ntid); const cs = byNote.get(note.id) ?? []; return {
+        id: note.id, deck: cs[0]?.source ?? "", notetype: nt?.name ?? "", kind: nt?.kind ?? "standard", fieldNames: nt?.fields.map((f: any) => (typeof f === "string" ? f : f.name)) ?? [], fields: note.fields,
+        tags: note.tags.filter((t) => !t.startsWith("auto::")), reasons: mark.r, yourNote: mark.t, cards: cs.length, reviews: cs.reduce((a, c) => a + c.reps, 0), lapses: cs.reduce((a, c) => a + c.lapses, 0),
+      }; }),
+    };
   }
 
   // ---- inbox ---------------------------------------------------------------
@@ -1322,17 +1363,19 @@ export class Store {
   /** Full backup as a plain object (token excluded). */
   backup() {
     const { sync, ...settings } = this.settings;
-    return { app: "yuzu", version: 1, at: Date.now(), settings: { ...settings, sync: { ...sync, token: "" } }, notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, hooks: this.hooks };
+    return { app: "yuzu", version: 1, at: Date.now(), settings: { ...settings, sync: { ...sync, token: "" } }, notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, hooks: this.hooks, improve: this.improve, mastery: this.mastery };
   }
   /** Small backup: everything irreplaceable (reviews, settings, personal notes, scheduling), without the card text that the repository or Anki can restore. */
   quickBackup() {
     const { sync, ...settings } = this.settings;
-    return { app: "yuzu", version: 1, quick: true, at: Date.now(), settings: { ...settings, sync: { ...sync, token: "" } }, cards: [...this.cards.values()].filter((c) => c.reps > 0 || c.suspended || c.flag), reviews: this.reviews, tombstones: this.tombstones, hooks: this.hooks };
+    return { app: "yuzu", version: 1, quick: true, at: Date.now(), settings: { ...settings, sync: { ...sync, token: "" } }, cards: [...this.cards.values()].filter((c) => c.reps > 0 || c.suspended || c.flag), reviews: this.reviews, tombstones: this.tombstones, hooks: this.hooks, improve: this.improve, mastery: this.mastery };
   }
   async restore(data: any, onProgress?: (m: string, f: number) => void) {
     if (data?.app !== "yuzu") throw new Error("Not a Yuzu backup file");
     for (const nt of data.notetypes ?? []) this.notetypes.set(nt.id, nt);
     if (data.tombstones) { this.tombstones = mergeTombstones(this.tombstones, data.tombstones); await db.setMeta("tombstones", this.tombstones); }
+    if (data.improve) { const merged = { ...this.improve }; for (const [k, v] of Object.entries(data.improve as typeof this.improve)) if ((merged[k]?.m ?? -1) < v.m) merged[k] = v; this.improve = merged; await db.setMeta("improve", merged); }
+    if (data.mastery) { const ids = new Set(this.mastery.log.map((e) => e.id)); this.mastery = { log: [...this.mastery.log, ...(data.mastery.log ?? []).filter((e: any) => !ids.has(e.id))], kept: { ...(data.mastery.kept ?? {}), ...this.mastery.kept } }; await db.setMeta("mastery", this.mastery); }
     if (data.hooks) { const merged = { ...this.hooks }; for (const [k, v] of Object.entries(data.hooks as typeof this.hooks)) if ((merged[k]?.m ?? -1) < v.m) merged[k] = v; this.hooks = merged; await db.setMeta("hooks", merged); }
     const n = mergeNotes(this.notes, data.notes ?? [], this.tombstones); const c = mergeCards(this.cards, data.cards ?? [], this.tombstones);
     const known = new Set(this.reviews.map((r) => r.id));

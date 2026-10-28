@@ -36,7 +36,10 @@ export interface SyncSnapshot {
   mediaWants?: Record<string, MediaWant>;
   /** Retired cards: the log of what was mastered, and cards the user chose to keep. Written as mastery.json. */
   mastery?: { log: MasteredEntry[]; kept: Record<string, number> };
+  /** Cards marked "needs improving": note id → reasons, the user's own words, time. Empty reasons = cleared. Written as improve.json. */
+  improve?: Record<string, ImproveMark>;
 }
+export interface ImproveMark { r: string[]; t: string; m: number }
 export interface MasteredEntry { id: string; nid: string; deck: string; front: string; back: string; tags: string[]; reps: number; lapses: number; firstReview: number; lastReview: number; intervalDays: number; at: number; by: "auto" | "you" }
 export interface MediaWant { id?: string; device: string; at: number; total: number; missing: string[] }
 export const wantPath = (device: string) => { let h = 0x811c9dc5; for (let i = 0; i < device.length; i++) h = Math.imul(h ^ device.charCodeAt(i), 16777619); return `wants/${(h >>> 0).toString(16).padStart(8, "0")}.json`; };
@@ -238,6 +241,7 @@ export class GitHubSync {
     const media = snap.media ?? {};
     if (Object.keys(media).length) await emit("media.json", "m" + Object.keys(media).sort().join(","), () => JSON.stringify(media));
     if (snap.mastery && (snap.mastery.log.length || Object.keys(snap.mastery.kept).length)) await emit("mastery.json", `m${snap.mastery.log.length}:${Object.keys(snap.mastery.kept).length}:${snap.mastery.log.reduce((a, b) => a + b.at, 0)}`, () => JSON.stringify(snap.mastery));
+    if (snap.improve && Object.keys(snap.improve).length) await emit("improve.json", `i${Object.keys(snap.improve).length}:${Object.values(snap.improve).reduce((a, b) => a + b.m, 0)}`, () => JSON.stringify(snap.improve));
     if (snap.hooks && Object.keys(snap.hooks).length) await emit("hooks.json", "h" + Object.keys(snap.hooks).length + ":" + Object.values(snap.hooks).reduce((a, b) => a + b.m, 0), () => JSON.stringify(snap.hooks));
     if (snap.mediaIndex && Object.keys(snap.mediaIndex).length) await emit("media/index.json", "i" + Object.keys(snap.mediaIndex).length + ":" + Object.values(snap.mediaIndex).reduce((a, b) => a + b.s, 0), () => JSON.stringify(snap.mediaIndex));
     for (const w of Object.values(snap.mediaWants ?? {})) await emit(wantPath(w.id ?? w.device), `w${w.at}:${w.total}:${w.missing.length}`, () => JSON.stringify(w));
@@ -289,6 +293,7 @@ export class GitHubSync {
       else if (p === "media/index.json") out.mediaIndex = data;
       else if (p === "hooks.json") out.hooks = data;
       else if (p === "mastery.json") out.mastery = data;
+      else if (p === "improve.json") out.improve = data;
       else if (p.startsWith("wants/") && data?.device) out.mediaWants = { ...(out.mediaWants ?? {}), [data.id ?? data.device]: data };
       else if (p.startsWith("notes/")) out.notes = (out.notes ?? []).concat(data);
       else if (p.startsWith("cards/")) out.cards = (out.cards ?? []).concat(data);

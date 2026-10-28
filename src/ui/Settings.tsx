@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store } from "../lib/store";
+import { ImproveSection } from "./Improve";
 import { retentionTradeoff } from "../scheduler/optimize";
 import { importAnki } from "../import/anki";
 import { inflateRaw, zstd } from "../lib/decompress";
@@ -106,7 +107,6 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
   const revOn = useMemo(() => new Map(reversible.map(({ nt, on }) => [nt.id, on && !store.cardsOfNoteType(nt.id, 1).every((c) => c.suspended)])), [reversible]);
   const v = store.getVersion();
   const mediaStat = useMemo(() => store.mediaStatus(), [scan, v, mediaBusy, result]); // not on every progress message: that rescans 78k files
-  const askList = useMemo(() => [...store.notes.values()].filter((n) => n.tags.includes("ask-claude")), [scan, result]);
   const [showToken, setShowToken] = useState(false);
   const sy = s.sync;
   const setSync = (patch: Partial<typeof sy>) => store.saveSettings({ sync: { ...sy, ...patch } });
@@ -211,13 +211,8 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           {revMsg && <p className="small muted" style={{ marginBottom: 0 }}>{revMsg}</p>}
         </div>
       </details>}
-      <details className="section"><summary>Cards to ask Claude about <span className="small muted">leeches you flagged</span></summary>
-      <div className="card-box">
-        <p className="small muted" style={{ marginTop: 0 }}>Leeches you marked as "mixed up with something similar". Copy the list into the chat and I'll make contrast cards for them.</p>
-        {(() => { const list = askList; return list.length ? (
-          <div className="row"><span className="small grow">{list.length} card{list.length === 1 ? "" : "s"}</span><button className="btn" onClick={async () => { const text = list.map((n) => "- " + noteTitle(n)).join("\n"); try { await navigator.clipboard.writeText(text); setResult("Copied " + list.length + " cards."); } catch { prompt("Copy this list:", text); } }}>Copy list</button><button className="btn" onClick={async () => { for (const n of list) await store.updateNote(n.id, n.fields, n.tags.filter((t) => t !== "ask-claude" && !t.startsWith("auto::"))); setScan((x) => x + 1); }}>Clear</button></div>
-        ) : <p className="small muted" style={{ margin: 0 }}>Nothing yet.</p>; })()}
-      </div>
+      <details className="section"><summary>Cards to improve <span className="small muted">send to Claude</span></summary>
+      <ImproveSection />
       </details>
       <details className="section"><summary>Import from Anki <span className="small muted">collection, packs, curation</span></summary>
       <div className="card-box">

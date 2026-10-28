@@ -7,6 +7,7 @@ import { previewIntervals, humanInterval, retrievability, DAY } from "../schedul
 import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore, IconEdit } from "./icons";
 import { systemColor, stamp, tilt } from "./theme";
 import { useBack } from "./useBack";
+import { ImproveSheet } from "./Improve";
 import { sfx } from "./sfx";
 import { SKIN_CSS, isShortCard } from "./cardskin";
 import { wireSounds, playSounds, stopSounds, cardSounds } from "./sound";
@@ -166,6 +167,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
   const [typed, setTyped] = useState("");
   const [hint, setHint] = useState(false);
   const [hookOpen, setHookOpen] = useState(false);
+  const [improveOpen, setImproveOpen] = useState(false);
   const [hookText, setHookText] = useState("");
   const [leech, setLeech] = useState<{ cardId: string; lapses: number } | null>(null);
   const [menu, setMenu] = useState(false);
@@ -326,12 +328,14 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
         <button className="icon-btn" onClick={undo} aria-label="Undo"><IconUndo /></button>
         <button className={"icon-btn" + (menu ? " on" : "")} onClick={() => setMenu(!menu)} aria-label="More"><IconMore /></button>
       </div>
+      {improveOpen && <ImproveSheet nids={[card.nid]} onClose={() => setImproveOpen(false)} />}
       {menu && (<>
         <div style={{ position: "fixed", inset: 0, zIndex: 34 }} onClick={() => setMenu(false)} />
         <div className="menu">
           <button onClick={() => { setMenu(false); setInfo(true); }}><IconInfo /> Card info and edit</button>
           <button onClick={() => { setMenu(false); setShowAnswer(true); setHookOpen(true); }}><IconEdit /> {hookText ? "Edit my hook" : "Add my hook"}</button>
           <button onClick={() => { setMenu(false); store.setFlag(card.id, card.flag ? 0 : 1); }}><IconFlag /> {card.flag ? "Remove flag" : "Flag this card"}</button>
+          <button onClick={() => { setMenu(false); setImproveOpen(true); }}><IconEdit /> {store.improveFor(card.nid) ? "Marked to improve — change" : "Needs improving…"}</button>
           <button className="danger" onClick={async () => { setMenu(false); await store.setSuspended(card.id, true); flash("Paused — won't be shown again until unsuspended"); setIdx((i) => i + 1); }}><IconPause /> Pause this card</button>
           <button onClick={async () => { setMenu(false); if (!confirm("Retire this card as mastered? It is deleted and kept in the Mastered log (Progress).")) return; await store.masterCards([card.id], "you"); setQueue((q) => q.filter((c, i) => i <= idx || c.id !== card.id)); flash("Retired as mastered"); setIdx((i) => i + 1); }}><IconFlag /> I've mastered this</button>
           <button className="danger" onClick={async () => { setMenu(false); const sibs = store.cardsOfNote(card.nid).length; if (!confirm(sibs > 1 ? `Delete this note and its ${sibs} cards? Their review history goes too.` : "Delete this card? Its review history goes too.")) return; await store.deleteNotes([card.nid]); lastDel.current = { card, at: idx + 1, removed: queue.filter((c, i) => i > idx && c.nid === card.nid) }; setQueue((q) => q.filter((c, i) => i <= idx || c.nid !== card.nid)); flash("Deleted — ↶ to undo"); setIdx((i) => i + 1); }}><IconClose /> Delete this card</button>

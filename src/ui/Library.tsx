@@ -9,6 +9,7 @@ import { useEffect, useRef } from "react";
 import { Duplicates } from "./Duplicates";
 import { bossPool, BOSS_PASS } from "./Boss";
 import { useBack } from "./useBack";
+import { ImproveSheet } from "./Improve";
 import { systemColor } from "./theme";
 
 function findNode(root: TreeNode, path: string): TreeNode | null {
@@ -114,6 +115,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   const go = (p: string) => { setPath(p); setShowCards(false); setSelecting(false); setSelected(new Set()); };
   useBack(!!path, () => go(path.split("::").slice(0, -1).join("::")));
   const [deleted, setDeleted] = useState<{ n: number; token: unknown } | null>(null);
+  const [improveFor, setImproveFor] = useState<string[] | null>(null);
 
   if (store.cards.size === 0) {
     return (<div className="screen"><h1>Library</h1><div className="empty">No cards yet. Import your Anki collection from Settings.</div></div>);
@@ -214,6 +216,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           <button className="btn" onClick={() => setMoveTo("")}>Move</button>
           <button className="btn" onClick={() => setClassify("System")}>System</button>
           <button className="btn" onClick={() => setClassify("Specialty")}>Specialty</button>
+          <button className="btn" onClick={() => setImproveFor([...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])])}>Needs improving</button>
           <button className="btn danger" onClick={async () => { const nids = [...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])]; if (!confirm(`Delete ${nids.length.toLocaleString()} note${nids.length === 1 ? "" : "s"} and all their cards? Review history goes too.`)) return; const n = await store.deleteNotes(nids); setSelected(new Set()); setSelecting(false); setDeleted({ n, token: store.lastDeleted }); }}>Delete</button>
         </div>
       )}
@@ -259,6 +262,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
         </div></div>
       )}
       {preview && <Preview card={preview} onClose={() => setPreview(null)} />}
+      {improveFor && <ImproveSheet nids={improveFor} onClose={() => { setImproveFor(null); setSelected(new Set()); setSelecting(false); }} />}
       {editSmart && <SmartEditor initial={editSmart === "new" ? undefined : editSmart} onClose={() => { setEditSmart(null); if (view === "smart" && path && !store.settings.smart.some((s) => s.id === path)) go(""); }} />}
     </div>
   );
