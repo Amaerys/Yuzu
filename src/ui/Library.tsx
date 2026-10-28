@@ -12,6 +12,14 @@ import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
 import { systemColor } from "./theme";
 
+/** Quick filters in the card list. */
+function passes(c: Card, only: "flagged" | "improve" | "suspended" | "leech"): boolean {
+  if (only === "flagged") return !!c.flag;
+  if (only === "suspended") return c.suspended;
+  if (only === "improve") return !!store.improveFor(c.nid);
+  return !!store.noteFor(c)?.tags.includes("leech");
+}
+
 function findNode(root: TreeNode, path: string): TreeNode | null {
   if (!path) return root;
   const parts = path.split("::");
@@ -67,6 +75,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   const [showCards, setShowCards] = useState(false);
   const [query, setQuery] = useState("");
   const [q, setQ] = useState(""); // debounced
+  const [only, setOnly] = useState<null | "flagged" | "improve" | "suspended" | "leech">(null); // quick filters
   useEffect(() => { const t = setTimeout(() => setQ(query.trim().toLowerCase()), 160); return () => clearTimeout(t); }, [query]);
   const [sort, setSort] = useState<"due" | "new" | "state" | "deck">("due");
   const [allTags, setAllTags] = useState(false);
@@ -95,9 +104,10 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   }, [scopeCards]);
 
   const matches = useMemo(() => {
-    if (!showCards && !q) return [] as Card[];
+    if (!showCards && !q && !only) return [] as Card[];
     const seen = new Set<string>(); const out: Card[] = [];
     for (const c of scopeCards) {
+      if (only && !passes(c, only)) continue; // checked per card, before siblings are folded together (a flag sits on one card)
       if (seen.has(c.nid)) continue;
       if (q) { const n = store.noteFor(c); if (!n || !store.searchText(n).includes(q)) continue; }
       seen.add(c.nid); out.push(c);
@@ -108,7 +118,8 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
     else if (sort === "state") out.sort((a, b) => (a.suspended ? 3 : order[a.state]) - (b.suspended ? 3 : order[b.state]));
     else out.sort((a, b) => a.source.localeCompare(b.source));
     return out;
-  }, [scopeCards, showCards, q, sort]);
+  }, [scopeCards, showCards, q, sort, only, store.getVersion()]);
+  const filterCounts = useMemo(() => { const k = { flagged: 0, improve: 0, suspended: 0, leech: 0 }; const notes = { improve: new Set<string>(), leech: new Set<string>() }; for (const c of scopeCards) { if (c.flag) k.flagged++; if (c.suspended) k.suspended++; if (store.improveFor(c.nid)) notes.improve.add(c.nid); if (store.noteFor(c)?.tags.includes("leech")) notes.leech.add(c.nid); } k.improve = notes.improve.size; k.leech = notes.leech.size; return k; }, [scopeCards, store.getVersion()]);
   const list = useMemo(() => matches.slice(0, 300).map((c) => { const n = store.noteFor(c)!; return { card: c, title: noteTitle(n, store.notetypeFor(n)), state: c.suspended ? "suspended" : c.state }; }), [matches]);
 
   // Hooks first, always in the same order (the empty-library screen below returns early).
@@ -168,7 +179,11 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
               </div>) : null; })()}
           </div>
           <div className="field"><input placeholder="Search cards and tags here" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
-          {!query && node && node.children.length > 0 && (
+          <div className="row" style={{ flexWrap: "wrap", gap: 6, margin: "-4px 0 10px" }}>
+            {([["flagged", "Flagged"], ["improve", "To improve"], ["leech", "Leeches"], ["suspended", "Paused"]] as const).map(([k, label]) => (
+              <button key={k} className={"chip" + (only === k ? " orange" : "")} disabled={!filterCounts[k] && only !== k} onClick={() => setOnly(only === k ? null : k)}>{label} · {filterCounts[k].toLocaleString()}</button>))}
+          </div>
+          {!query && !only && node && node.children.length > 0 && (
             <>
               <h2>{view === "tags" ? "Tags" : "Categories"}</h2>
               {view === "tags" && !path && <label className="row small muted" style={{ marginBottom: 6 }}><input type="checkbox" checked={allTags} onChange={(e) => setAllTags(e.target.checked)} /> Show deck housekeeping tags (#, !)</label>}
@@ -187,8 +202,8 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
             const rows = [...by].sort((a, b) => b[1].total - a[1].total).slice(0, 12);
             return rows.length > 1 ? (<><h2>Where these cards live</h2>{rows.map(([k, e]) => <div key={k} className="tree-row"><span className="name" style={{ fontWeight: 500 }}>{k}</span><span className="counts">{e.due ? <span><b className="c-due">{e.due.toLocaleString()}</b> due</span> : null}<span><b>{e.total.toLocaleString()}</b> cards</span></span></div>)}</>) : null;
           })()}
-          {!query && !showCards && <button className="btn ghost block" style={{ marginTop: 12 }} onClick={() => setShowCards(true)}>Show cards in {title}</button>}
-          {(showCards || query) && (
+          {!query && !only && !showCards && <button className="btn ghost block" style={{ marginTop: 12 }} onClick={() => setShowCards(true)}>Show cards in {title}</button>}
+          {(showCards || query || only) && (
             <>
               <div className="row" style={{ marginTop: 18 }}>
                 <h2 className="grow" style={{ margin: 0 }}>{matches.length.toLocaleString()} cards{matches.length > 300 ? ", first 300 shown" : ""}</h2>
@@ -212,6 +227,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           <button className="btn" onClick={() => doBulk({ suspended: true })}>Suspend</button>
           <button className="btn" onClick={() => doBulk({ suspended: false })}>Unsuspend</button>
           <button className="btn" onClick={() => doBulk({ flag: 1 })}>Flag</button>
+          <button className="btn" onClick={() => doBulk({ flag: 0 })}>Unflag</button>
           <button className="btn" onClick={() => setTagTo("")}>Tag</button>
           <button className="btn" onClick={() => setMoveTo("")}>Move</button>
           <button className="btn" onClick={() => setClassify("System")}>System</button>
