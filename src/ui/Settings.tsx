@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store } from "../lib/store";
+import { retentionTradeoff } from "../scheduler/optimize";
 import { importAnki } from "../import/anki";
 import { inflateRaw, zstd } from "../lib/decompress";
 import { getMeta } from "../lib/db";
@@ -159,13 +160,15 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
             <option value="due">By due date</option>
             <option value="shuffle">Shuffled</option>
           </select><span className="small muted">Cards are also spread across systems so neighbours differ.</span></div>
-        <div className="field"><label>Desired retention (FSRS)</label>
+        <div className="field"><label>Desired retention (FSRS-6)</label>
           <select value={s.scheduler.desiredRetention} onChange={(e) => store.saveSettings({ scheduler: { ...s.scheduler, desiredRetention: Number(e.target.value) } })}>
-            {[0.8, 0.85, 0.9, 0.95].map((r) => <option key={r} value={r}>{Math.round(r * 100)}%</option>)}
-          </select></div>
+            {[0.8, 0.82, 0.85, 0.87, 0.88, 0.9, 0.92, 0.95].map((r) => <option key={r} value={r}>{Math.round(r * 100)}%</option>)}
+          </select>
+          <span className="small muted">The chance you still remember a card when it comes back. Higher = more reviews.</span>
+          <Tradeoff /></div>
         <div className="field"><label>Scheduler weights</label>
           <div className="row"><button className="btn grow" disabled={!!store.fitting} onClick={async () => { setFitMsg("Fitting…"); setFitMsg(await store.optimizeScheduler()); }}>{store.fitting ? `Fitting… ${Math.round(store.fitting.progress * 100)}%` : "Tune to my history"}</button></div>
-          <p className="small muted" style={{ marginBottom: 0 }}>{fitMsg || (s.fit ? `Fitted ${fmtDate(s.fit.at)} on ${s.fit.n.toLocaleString()} reviews (error ${s.fit.before.toFixed(3)} → ${s.fit.after.toFixed(3)}). Re-runs automatically every ~1000 reviews.` : "Default FSRS weights. Runs automatically once you have ~400 spaced reviews.")}</p>
+          <p className="small muted" style={{ marginBottom: 0 }}>{fitMsg || (s.fit ? `FSRS-6, fitted ${fmtDate(s.fit.at)} on ${s.fit.n.toLocaleString()} reviews (error ${s.fit.before.toFixed(3)} → ${s.fit.after.toFixed(3)}). Re-runs automatically every ~1000 reviews.` : "Default FSRS-6 weights. Tuning to your history runs automatically once you have ~400 spaced reviews.")}</p>
         </div>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.nightCards} onChange={(e) => store.saveSettings({ nightCards: e.target.checked })} /> Slate cards (dark card paper, easier at night)</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.swipe} onChange={(e) => store.saveSettings({ swipe: e.target.checked })} /> Swipe to answer (left = Again, right = Good)</label>
@@ -401,5 +404,27 @@ function AutoSend({ busy }: { busy: boolean }) {
       {others.length > 0 && <ul className="small muted" style={{ margin: "6px 0 0" }}>{others.map((w) => <li key={w.device}><b>{w.device}</b>: {w.total ? `missing ${w.total.toLocaleString()} file${w.total === 1 ? "" : "s"}` : "has everything"} <span className="muted">(as of {fmtDateTime(w.at)})</span></li>)}</ul>}
       {store.sendNote && <p className="small" style={{ margin: "6px 0 0" }}>{store.sendNote}</p>}
     </div>
+  );
+}
+
+/** Workload vs recall target from a simulated year with the user's own weights, answer times and daily new cards. */
+function Tradeoff() {
+  const [rows, setRows] = useState<ReturnType<typeof retentionTradeoff>["curve"] | null>(null);
+  const s = store.settings; const perDay = Math.max(1, s.newPerDay || 10);
+  const show = [0.8, 0.85, 0.87, 0.88, 0.9, 0.92, 0.95];
+  return (
+    <details className="how" onToggle={(e) => { if ((e.target as HTMLDetailsElement).open && !rows) setTimeout(() => setRows(retentionTradeoff(s.scheduler.w, store.reviews, { perDay, from: 0.8, to: 0.95 }).curve), 30); }}>
+      <summary className="small">What each choice costs you</summary>
+      {!rows ? <p className="small muted">Working it out from your reviews…</p> : (<>
+        <table className="small" style={{ borderCollapse: "collapse", width: "100%", marginTop: 6 }}>
+          <thead><tr><th style={{ textAlign: "left" }}>Target</th><th style={{ textAlign: "right" }}>Study / day</th><th style={{ textAlign: "right" }}>Still remembered after a year</th></tr></thead>
+          <tbody>{rows.filter((r) => show.some((x) => Math.abs(x - r.r) < 0.001)).map((r) => (
+            <tr key={r.r} style={Math.abs(r.r - s.scheduler.desiredRetention) < 0.001 ? { color: "var(--orange)", fontWeight: 700 } : undefined}>
+              <td>{Math.round(r.r * 100)}%{Math.abs(r.r - s.scheduler.desiredRetention) < 0.001 ? " (now)" : ""}</td><td style={{ textAlign: "right" }}>{r.minutesPerDay.toFixed(0)} min</td><td style={{ textAlign: "right" }}>{Math.round(r.rememberedShare * 100)}%</td>
+            </tr>))}</tbody>
+        </table>
+        <p className="small muted" style={{ margin: "6px 0 0" }}>A simulated year of {perDay} new cards a day, with your tuned scheduler, your answer times and your Again/Hard/Good/Easy mix. Below ~85% you save time but forget more of what you've learned; above ~90% each extra point costs a lot more time. For medicine you need to recall reliably, 85–90% is the usual sweet spot.</p>
+      </>)}
+    </details>
   );
 }

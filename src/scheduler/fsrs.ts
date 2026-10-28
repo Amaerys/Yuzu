@@ -1,11 +1,25 @@
 // FSRS (Free Spaced Repetition Scheduler) — the algorithm modern Anki uses.
-// Implemented from the published FSRS-5 formulas with the default parameters.
+// FSRS-6, ported from the reference implementation (open-spaced-repetition/ts-fsrs, models/fsrs-6):
+// 21 parameters; w[20] is the personal forgetting-curve decay (FSRS-5 fixed it at 0.5), w[19] shapes same-day reviews.
 import type { Card, CardState, Rating, Review } from "../lib/model";
 
-export const DEFAULT_W = [0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046, 1.54575, 0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315, 2.9898, 0.51655, 0.6621];
-const DECAY = -0.5;
-const FACTOR = 19 / 81;
+/** FSRS-6 default parameters (ts-fsrs FSRS6_DEFAULT_WEIGHTS). */
+export const DEFAULT_W = [0.212, 1.2931, 2.3065, 8.2956, 6.4133, 0.8334, 3.0194, 0.001, 1.8722, 0.1666, 0.796, 1.4835, 0.0614, 0.2629, 1.6483, 0.6014, 1.8729, 0.5425, 0.0912, 0.0658, 0.1542];
+/** The FSRS-5 defaults Yuzu used before 28/10/2026 (to recognise untouched settings when upgrading). */
+export const FSRS5_DEFAULT_W = [0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046, 1.54575, 0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315, 2.9898, 0.51655, 0.6621];
+export const S_MIN = 0.001, S_MAX = 36500;
 export const DAY = 86400000;
+
+/**
+ * Upgrade saved weights to FSRS-6. Untouched FSRS-5 defaults become the FSRS-6 defaults; weights tuned to the user
+ * under FSRS-5 keep their exact behaviour (w19 = 0, decay 0.5) until the next tuning fits all 21.
+ */
+export function toFsrs6(w: number[] | undefined): number[] {
+  if (!w || !w.length) return DEFAULT_W.slice();
+  if (w.length >= 21) return w.slice(0, 21);
+  if (w.length === 19) return w.every((x, i) => Math.abs(x - FSRS5_DEFAULT_W[i]) < 1e-9) ? DEFAULT_W.slice() : [...w, 0, 0.5];
+  return DEFAULT_W.slice();
+}
 
 export interface SchedulerConfig {
   w: number[];
@@ -18,34 +32,44 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   w: DEFAULT_W, desiredRetention: 0.9, maximumInterval: 36500, learningSteps: [1, 10], relearningSteps: [10],
 };
 
+// The weights in use (set by the store when settings load or change), so retrievability() needs no argument.
+let active = DEFAULT_W;
+export function setActiveWeights(w: number[]) { active = toFsrs6(w); }
+const decayOf = (w: number[]) => { const d = -(w[20] ?? 0.5); return { decay: d, factor: Math.pow(0.9, 1 / d) - 1 }; };
+
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
 
-export function retrievability(elapsedDays: number, stability: number): number {
+export function retrievability(elapsedDays: number, stability: number, w: number[] = active): number {
   if (stability <= 0) return 0;
-  return Math.pow(1 + FACTOR * elapsedDays / stability, DECAY);
+  const { decay, factor } = decayOf(w);
+  return Math.pow(1 + factor * elapsedDays / stability, decay);
 }
-export function intervalFor(stability: number, retention: number, maxDays: number): number {
-  const i = (stability / FACTOR) * (Math.pow(retention, 1 / DECAY) - 1);
+export function intervalFor(stability: number, retention: number, maxDays: number, w: number[] = active): number {
+  const { decay, factor } = decayOf(w);
+  const i = (stability / factor) * (Math.pow(retention, 1 / decay) - 1);
   return clamp(Math.round(i), 1, maxDays);
 }
-function initStability(w: number[], g: Rating) { return Math.max(w[g - 1], 0.1); }
-function initDifficulty(w: number[], g: Rating) { return clamp(w[4] - Math.exp(w[5] * (g - 1)) + 1, 1, 10); }
+function initStability(w: number[], g: Rating) { return clamp(w[g - 1], S_MIN, S_MAX); }
+function initDifficultyRaw(w: number[], g: Rating) { return w[4] - Math.exp((g - 1) * w[5]) + 1; }
+function initDifficulty(w: number[], g: Rating) { return clamp(initDifficultyRaw(w, g), 1, 10); }
 function nextDifficulty(w: number[], d: number, g: Rating) {
   const delta = -w[6] * (g - 3);
-  const dPrime = d + delta * ((10 - d) / 9);
-  return clamp(w[7] * initDifficulty(w, 4) + (1 - w[7]) * dPrime, 1, 10);
+  const dPrime = d + (delta * (10 - d)) / 9; // linear damping
+  return clamp(w[7] * initDifficultyRaw(w, 4) + (1 - w[7]) * dPrime, 1, 10); // mean reversion toward D0(Easy)
 }
 function nextRecallStability(w: number[], d: number, s: number, r: number, g: Rating) {
   const hard = g === 2 ? w[15] : 1;
   const easy = g === 4 ? w[16] : 1;
-  return s * (Math.exp(w[8]) * (11 - d) * Math.pow(s, -w[9]) * (Math.exp(w[10] * (1 - r)) - 1) * hard * easy + 1);
+  return clamp(s * (1 + Math.exp(w[8]) * (11 - d) * Math.pow(s, -w[9]) * (Math.exp((1 - r) * w[10]) - 1) * hard * easy), S_MIN, S_MAX);
 }
 function nextForgetStability(w: number[], d: number, s: number, r: number) {
-  const sf = w[11] * Math.pow(d, -w[12]) * (Math.pow(s + 1, w[13]) - 1) * Math.exp(w[14] * (1 - r));
-  return Math.min(sf, s);
+  const sf = clamp(w[11] * Math.pow(d, -w[12]) * (Math.pow(s + 1, w[13]) - 1) * Math.exp((1 - r) * w[14]), S_MIN, S_MAX);
+  const floor = s / Math.exp(w[17] * w[18]);
+  return clamp(floor, S_MIN, sf); // reference: min(post-lapse stability, s / e^(w17·w18))
 }
 function shortTermStability(w: number[], s: number, g: Rating) {
-  return s * Math.exp(w[17] * (g - 3 + w[18]));
+  const sinc = Math.pow(s, -(w[19] ?? 0)) * Math.exp(w[17] * (g - 3 + w[18]));
+  return clamp(s * (g >= 2 ? Math.max(sinc, 1) : sinc), S_MIN, S_MAX);
 }
 
 /** Memory-state update only (no learning steps). Used by both live scheduling and revlog replay. */
@@ -56,7 +80,7 @@ export function updateMemory(w: number[], card: { stability: number; difficulty:
   if (elapsedDays < 1) {
     return { stability: shortTermStability(w, card.stability, g), difficulty: nextDifficulty(w, card.difficulty, g) };
   }
-  const r = retrievability(elapsedDays, card.stability);
+  const r = retrievability(elapsedDays, card.stability, w);
   const difficulty = nextDifficulty(w, card.difficulty, g);
   const stability = g === 1 ? nextForgetStability(w, card.difficulty, card.stability, r) : nextRecallStability(w, card.difficulty, card.stability, r, g);
   return { stability, difficulty };
@@ -66,7 +90,7 @@ export interface Outcome { card: Card; review: Review; intervalDays: number }
 
 /** Apply a rating to a card at time `now`. Returns the new card and the review record. */
 export function rate(card: Card, g: Rating, now: number, cfg: SchedulerConfig = DEFAULT_CONFIG, durationMs = 0): Outcome {
-  const w = cfg.w;
+  const w = toFsrs6(cfg.w);
   const elapsedDays = card.lastReview ? (now - card.lastReview) / DAY : 0;
   const before = card.state;
   const mem = updateMemory(w, card, g, elapsedDays);
@@ -74,7 +98,7 @@ export function rate(card: Card, g: Rating, now: number, cfg: SchedulerConfig = 
   let intervalDays = 0;
 
   const scheduleReview = () => {
-    intervalDays = intervalFor(next.stability, cfg.desiredRetention, cfg.maximumInterval);
+    intervalDays = intervalFor(next.stability, cfg.desiredRetention, cfg.maximumInterval, w);
     if (g === 4 && before !== "review") intervalDays = Math.max(intervalDays, 4);
     next.state = "review"; next.step = 0;
     next.due = now + intervalDays * DAY;
@@ -114,7 +138,8 @@ export function rate(card: Card, g: Rating, now: number, cfg: SchedulerConfig = 
 }
 
 /** Rebuild a card's memory state from an ordered review history (e.g. imported from Anki). */
-export function replay(card: Card, reviews: Review[], w: number[] = DEFAULT_W, retention = 0.9): Card {
+export function replay(card: Card, reviews: Review[], w0: number[] = DEFAULT_W, retention = 0.9): Card {
+  const w = toFsrs6(w0);
   let c: Card = { ...card, stability: 0, difficulty: 0, reps: 0, lapses: 0, lastReview: 0, state: "new", step: 0 };
   if (reviews.length) c.mod = Math.max(c.mod ?? 0, reviews[reviews.length - 1].ts);
   let lastDay = 0;
@@ -130,7 +155,7 @@ export function replay(card: Card, reviews: Review[], w: number[] = DEFAULT_W, r
   }
   if (c.reps === 0) return c;
   if (c.state === "review") {
-    const ivl = intervalFor(c.stability, retention, 36500);
+    const ivl = intervalFor(c.stability, retention, 36500, w);
     c.due = c.lastReview + ivl * DAY;
   } else {
     c.due = c.lastReview + 10 * 60000; // still in steps: show soon

@@ -26,7 +26,7 @@ function Calibration() {
         {[0.5, 1].map((t) => <text key={t} x={pad - 2} y={y(t) + 3} fontSize="10" fill="var(--muted)" textAnchor="end" style={{ fontFamily: "var(--px)" }}>{t * 100}%</text>)}
         {rows.map((r) => { const h = 2 + Math.round(Math.min(4, Math.log10(r.n + 1) * 1.6)); return <rect key={r.bucket} x={Math.round(x(r.predicted)) - h} y={Math.round(y(r.observed)) - h} width={h * 2} height={h * 2} fill="var(--orange)" shapeRendering="crispEdges"><title>{r.bucket}: predicted {(r.predicted * 100).toFixed(0)}%, observed {(r.observed * 100).toFixed(0)}% ({r.n} reviews)</title></rect>; })}
       </svg>
-      <div className="small muted">{store.settings.fit ? `Weights fitted ${fmtDate(store.settings.fit.at)} on ${store.settings.fit.n.toLocaleString()} reviews.` : "Using default FSRS weights; fitting runs automatically once there is enough history (Settings → Studying)."}</div>
+      <div className="small muted">{store.settings.fit ? `FSRS-6 weights fitted ${fmtDate(store.settings.fit.at)} on ${store.settings.fit.n.toLocaleString()} reviews.` : "Using default FSRS-6 weights; tuning to your history runs automatically once there is enough (Settings → Studying)."}</div>
     </div>
   );
 }
@@ -91,6 +91,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
           <span className="c-learn">{(counts.learning + counts.relearning).toLocaleString()} learning</span>
           <span className="c-due">{counts.review.toLocaleString()} learned</span>
           <span className="muted">{counts.suspended.toLocaleString()} suspended</span>
+          {store.mastery.log.length > 0 && <span style={{ color: "var(--yuzu)" }}>{store.mastery.log.length.toLocaleString()} mastered &amp; retired</span>}
         </div>
       </div>
       <h2>Is the scheduler calibrated?</h2>
@@ -123,12 +124,21 @@ function Mastered() {
   const [open, setOpen] = useState<"list" | "log" | null>(null);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [q, setQ] = useState("");
-  if (!cands.length && !log.length) return null;
+  const monthAgo = Date.now() - 30 * 86400000;
+  const byYou = log.filter((e) => e.by === "you").length, auto = log.length - byYou, recent = log.filter((e) => e.at > monthAgo).length;
+  const ask = (store.settings.retireAskYears ?? 5) * 365.25;
+  const nearing = useMemo(() => { let n = 0; for (const c of store.cards.values()) { const d = store.intervalDays(c); if (d > ask / 2 && d <= ask) n++; } return n; }, [v, ask]);
+  if (!cands.length && !log.length && !nearing) return null;
   const toggle = (id: string) => setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const shownLog = [...log].reverse().filter((e) => !q || (e.front + " " + e.back + " " + e.deck).toLowerCase().includes(q.toLowerCase()));
   return (
     <div className="card-box" style={{ marginBottom: 14 }}>
       <b>Mastered</b>
+      <div className="stat-grid" style={{ marginTop: 8 }}>
+        <div className="stat"><b>{log.length.toLocaleString()}</b><span>retired ({byYou.toLocaleString()} by you, {auto.toLocaleString()} auto)</span></div>
+        <div className="stat"><b>{recent.toLocaleString()}</b><span>in the last 30 days</span></div>
+        <div className="stat"><b>{nearing.toLocaleString()}</b><span>getting close (next review {Math.round(ask / 365.25 / 2 * 10) / 10}–{Math.round(ask / 365.25)} y away)</span></div>
+      </div>
       <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 8 }}>
         {cands.length > 0 && <button className="btn primary" onClick={() => { setSel(new Set(cands.map((c) => c.id))); setOpen("list"); }}>{cands.length.toLocaleString()} ready to retire</button>}
         {log.length > 0 && <button className="btn" onClick={() => setOpen("log")}>Log · {log.length.toLocaleString()}</button>}

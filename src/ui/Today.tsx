@@ -96,6 +96,7 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, top,
           <div className="stat-grid">
             <div className="stat"><b>{stats.streak}</b><span>day streak</span></div>
             <div className="stat"><b>{stats.today}</b><span>reviews today</span></div>
+            {store.mastery.log.length > 0 && <div className="stat"><b>{store.mastery.log.length.toLocaleString()}</b><span>mastered</span></div>}
             <div className="stat"><b>{counts.review.toLocaleString()}</b><span>cards learned</span></div>
           </div>
           {onSearch && <form className="field" style={{ margin: "12px 0 0" }} onSubmit={(e) => { e.preventDefault(); if (q.trim()) onSearch(q.trim()); }}><input placeholder="Search all cards and tags" value={q} onChange={(e) => setQ(e.target.value)} /></form>}

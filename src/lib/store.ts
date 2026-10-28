@@ -1,7 +1,7 @@
 // In-memory collection + persistence + derived views (category tree, study queue, stats).
 import type { Card, CardState, Note, Notetype, Rating, Review } from "./model";
 import * as db from "./db";
-import { rate, replay, retrievability, DEFAULT_CONFIG, type SchedulerConfig, DAY } from "../scheduler/fsrs";
+import { rate, replay, retrievability, DEFAULT_CONFIG, type SchedulerConfig, DAY, toFsrs6, setActiveWeights } from "../scheduler/fsrs";
 import { fit as fitWeights, calibration as calib } from "../scheduler/optimize";
 import type { ImportResult } from "../import/anki";
 import { parsePack, describePack } from "../import/pack";
@@ -203,7 +203,7 @@ export class Store {
           if (got.reviews) { const m = mergeReviews(this.reviews, got.reviews, this.tombstones); pulledR = m.added; if (m.added) { const ids = new Set(this.reviews.map((r) => r.id)); await db.putMany("reviews", got.reviews.filter((r) => !ids.has(r.id))); this.reviews = m.list; } }
           if (got.settings && (got.settings as any).updatedAt > ((this.settings as any).updatedAt ?? 0)) {
             const { sync: _s, deviceName: _d, nightCards: _n, swipe: _w, typeAnswers: _t, mediaDownload: _m, theme: _th, sfx: _sf, autoplay: _ap, cardStyle: _cs, ...rest } = got.settings as any; // per-device fields stay local
-            this.settings = { ...this.settings, ...rest }; await db.setMeta("settings", this.settings);
+            this.settings = { ...this.settings, ...rest }; this.settings.scheduler = { ...this.settings.scheduler, w: toFsrs6(this.settings.scheduler.w) }; setActiveWeights(this.settings.scheduler.w); await db.setMeta("settings", this.settings);
           }
           if (got.mastery) {
             const ids = new Set(this.mastery.log.map((e) => e.id)); const log = [...this.mastery.log, ...got.mastery.log.filter((e) => !ids.has(e.id))];
@@ -401,6 +401,9 @@ export class Store {
     this.packLog = await db.getMeta<typeof this.packLog>("packLog", []);
     this.mergeLog = await db.getMeta<typeof this.mergeLog>("mergeLog2", []);
     this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) } };
+    // FSRS-6 (28/10/2026): 19 saved weights → 21; re-tune on the user's history under FSRS-6 shortly after start.
+    if ((this.settings.scheduler.w?.length ?? 0) < 21) { this.settings = { ...this.settings, scheduler: { ...this.settings.scheduler, w: toFsrs6(this.settings.scheduler.w) }, fit: null }; await db.setMeta("settings", this.settings); }
+    setActiveWeights(this.settings.scheduler.w);
     await this.migrations();
     this.loaded = true;
     if (this.syncConfigured()) this.syncStatus = { state: "idle", message: "Ready", at: 0 };
@@ -427,6 +430,7 @@ export class Store {
 
   async saveSettings(patch: Partial<Settings>) {
     this.settings = { ...this.settings, ...patch, updatedAt: stamp() } as Settings;
+    if (patch.scheduler) setActiveWeights(this.settings.scheduler.w);
     this.bump();
     await this.persist("saving settings", db.setMeta("settings", this.settings));
     this.touch();
