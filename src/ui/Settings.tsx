@@ -171,6 +171,14 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.swipe} onChange={(e) => store.saveSettings({ swipe: e.target.checked })} /> Swipe to answer (left = Again, right = Good)</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.typeAnswers} onChange={(e) => store.saveSettings({ typeAnswers: e.target.checked })} /> Type the answer on language cards</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.burySiblings} onChange={(e) => store.saveSettings({ burySiblings: e.target.checked })} /> Bury siblings (don't show two cards of one note in a session)</label>
+        <div className="field"><label>Offer to retire as mastered when the next review is more than</label>
+          <select value={s.retireAskYears ?? 5} onChange={(e) => store.saveSettings({ retireAskYears: Number(e.target.value) })}>
+            {[1, 2, 3, 5, 7, 10].map((y) => <option key={y} value={y}>{y} year{y === 1 ? "" : "s"} away</option>)}
+          </select></div>
+        <div className="field"><label>Retire automatically when the next review is more than</label>
+          <select value={s.retireAutoYears ?? 20} onChange={(e) => { const v = Number(e.target.value); store.saveSettings({ retireAutoYears: v }); if (v) store.autoMaster(); }}>
+            {[0, 5, 10, 15, 20, 30].map((y) => <option key={y} value={y}>{y ? `${y} years away` : "Never (always ask)"}</option>)}
+          </select></div>
         <div className="field"><label>Streak rest days per week</label>
           <select value={s.restDays} onChange={(e) => store.saveSettings({ restDays: Number(e.target.value) })}>
             {[0, 1, 2].map((h) => <option key={h} value={h}>{h}</option>)}

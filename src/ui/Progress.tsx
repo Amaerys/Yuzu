@@ -133,10 +133,10 @@ function Mastered() {
         {cands.length > 0 && <button className="btn primary" onClick={() => { setSel(new Set(cands.map((c) => c.id))); setOpen("list"); }}>{cands.length.toLocaleString()} ready to retire</button>}
         {log.length > 0 && <button className="btn" onClick={() => setOpen("log")}>Log · {log.length.toLocaleString()}</button>}
       </div>
-      <p className="small muted" style={{ margin: "8px 0 0" }}>Next review more than 5 years away: you decide here. More than 20 years: retired automatically. “I've mastered this” in a card's ⋯ menu retires it right away. Retired cards are deleted (their pictures too) and kept in the log.</p>
+      <p className="small muted" style={{ margin: "8px 0 0" }}>Next review more than {store.settings.retireAskYears ?? 5} year{(store.settings.retireAskYears ?? 5) === 1 ? "" : "s"} away: you decide here. {store.settings.retireAutoYears ? `More than ${store.settings.retireAutoYears} years: retired automatically.` : "Nothing is retired automatically."} Change both in Settings → Studying. “I've mastered this” in a card's ⋯ menu retires it right away. Retired cards are deleted (their pictures too) and kept in the log.</p>
       {open === "list" && createPortal(
         <div className="sheet-backdrop" onClick={() => setOpen(null)}><div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxHeight: "85vh", overflow: "auto" }}>
-          <b>{cands.length.toLocaleString()} cards next due in more than 5 years</b>
+          <b>{cands.length.toLocaleString()} cards next due in more than {store.settings.retireAskYears ?? 5} year{(store.settings.retireAskYears ?? 5) === 1 ? "" : "s"}</b>
           <p className="small muted">Ticked cards are retired: deleted, with their question and answer kept in the Mastered log. “Keep studying” takes them off this list for good.</p>
           <div className="row" style={{ gap: 8, margin: "6px 0" }}>
             <button className="btn" onClick={() => setSel(new Set(cands.map((c) => c.id)))}>All</button>

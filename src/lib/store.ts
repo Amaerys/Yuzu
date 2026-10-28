@@ -32,6 +32,8 @@ export interface Settings {
   /** Mastery thresholds in days of stability. */
   mastery: { developing: number; mastered: number; durable: number };
   leechThreshold: number;
+  /** Mastered: offer cards whose next review is more than this many years away; retire automatically past `retireAutoYears` (0 = never). */
+  retireAskYears: number; retireAutoYears: number;
   /** Boss fight results per node key (view:path). */
   bosses: Record<string, { at: number; score: number; best: number; passed: boolean }>;
   typeAnswers: boolean;
@@ -57,7 +59,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, maxReviewsPerDay: 0, dueOrder: "forgotten", rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
-  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {},
+  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {},
 };
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
 export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number; pending?: boolean }
@@ -655,13 +657,14 @@ export class Store {
   }
   // ---- Mastery: retire cards whose next review is years away ----------------------------------------
   mastery: { log: MasteredEntry[]; kept: Record<string, number> } = { log: [], kept: {} };
-  static MASTER_AUTO_DAYS = 20 * 365.25; static MASTER_ASK_DAYS = 5 * 365.25;
+  private get askDays() { return (this.settings.retireAskYears ?? 5) * 365.25; }
+  private get autoDays() { const y = this.settings.retireAutoYears ?? 20; return y > 0 ? y * 365.25 : Infinity; }
   /** Days from the last review to the next one (0 for cards not in review). */
   intervalDays(c: Card) { return c.state === "review" && c.lastReview ? (c.due - c.lastReview) / 86400000 : 0; }
-  /** Cards whose next review is more than 5 years away (and under the 20-year automatic line), not kept, not paused. */
+  /** Cards whose next review is beyond the "offer" line (and under the automatic line), not kept, not paused. */
   masteryCandidates(): Card[] {
     const out: Card[] = [];
-    for (const c of this.cards.values()) { const d = this.intervalDays(c); if (d > Store.MASTER_ASK_DAYS && !c.suspended && !this.mastery.kept[c.id]) out.push(c); }
+    for (const c of this.cards.values()) { const d = this.intervalDays(c); if (d > this.askDays && d <= this.autoDays && !c.suspended && !this.mastery.kept[c.id]) out.push(c); }
     return out.sort((a, b) => this.intervalDays(b) - this.intervalDays(a));
   }
   /** What a card asks and answers, as plain text (cloze: this card's gap shown as […], the answer separately). */
@@ -696,7 +699,7 @@ export class Store {
   /** "Keep studying these": they leave the list for good. */
   async keepCards(ids: string[]) { const kept = { ...this.mastery.kept }; const now = stamp(); for (const id of ids) kept[id] = now; this.mastery = { ...this.mastery, kept }; await this.persist("saving", db.setMeta("mastery", this.mastery)); this.bump(); this.touch(); }
   /** Cards past 20 years retire on their own (run at start and after a sync, never mid-session so ↶ still works). */
-  async autoMaster() { const recent = Date.now() - 3600000; const ids = [...this.cards.values()].filter((c) => this.intervalDays(c) > Store.MASTER_AUTO_DAYS && c.lastReview < recent).map((c) => c.id); return ids.length ? this.masterCards(ids, "auto") : 0; }
+  async autoMaster() { const recent = Date.now() - 3600000; const ids = [...this.cards.values()].filter((c) => this.intervalDays(c) > this.autoDays && c.lastReview < recent).map((c) => c.id); return ids.length ? this.masterCards(ids, "auto") : 0; }
   /** Remove every note a pack added (cards and history go with them). */
   async removePack(id: string) {
     const e = this.packLog.find((x) => x.id === id); if (!e) return 0;
