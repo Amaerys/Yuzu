@@ -236,6 +236,11 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
     if (navigator.vibrate) navigator.vibrate(g === 1 ? [30, 40, 30] : 12);
   }
   async function undo() {
+    const del = lastDel.current;
+    if (del && del.at === idx) { // the last thing done was deleting a card: bring it back in place
+      lastDel.current = null; await store.undoDelete();
+      setQueue((q) => [...q.slice(0, idx), del.card, ...q.slice(idx)]); flash("Card restored"); return;
+    }
     const prev = await store.undoLast();
     if (prev) {
       // Show the undone card again, in place: it is still in the queue at idx-1 (or was inserted later as a lapse).
@@ -244,6 +249,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
       setDoneCount((d) => Math.max(0, d - 1)); setResults((r) => r.slice(0, -1)); flash("Undone");
     } else flash("Nothing to undo");
   }
+  const lastDel = useRef<{ card: Card; at: number } | null>(null);
   function flash(msg: string) { setToast(msg); setTimeout(() => setToast(""), 1400); }
 
   // Swipe to answer (only once the answer is visible).
@@ -327,6 +333,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, onExi
           <button onClick={() => { setMenu(false); setShowAnswer(true); setHookOpen(true); }}><IconEdit /> {hookText ? "Edit my hook" : "Add my hook"}</button>
           <button onClick={() => { setMenu(false); store.setFlag(card.id, card.flag ? 0 : 1); }}><IconFlag /> {card.flag ? "Remove flag" : "Flag this card"}</button>
           <button className="danger" onClick={async () => { setMenu(false); await store.setSuspended(card.id, true); flash("Paused — won't be shown again until unsuspended"); setIdx((i) => i + 1); }}><IconPause /> Pause this card</button>
+          <button className="danger" onClick={async () => { setMenu(false); const sibs = store.cardsOfNote(card.nid).length; if (!confirm(sibs > 1 ? `Delete this note and its ${sibs} cards? Their review history goes too.` : "Delete this card? Its review history goes too.")) return; await store.deleteNotes([card.nid]); lastDel.current = { card, at: idx + 1 }; setQueue((q) => q.filter((c, i) => i <= idx || c.nid !== card.nid)); flash("Deleted — ↶ to undo"); setIdx((i) => i + 1); }}><IconClose /> Delete this card</button>
         </div>
       </>)}
       <div className="study-meta">

@@ -116,6 +116,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
 
   const go = (p: string) => { setPath(p); setShowCards(false); setSelecting(false); setSelected(new Set()); };
   useBack(!!path, () => go(path.split("::").slice(0, -1).join("::")));
+  const [deleted, setDeleted] = useState(0);
   const doBulk = async (action: Parameters<typeof store.bulk>[1]) => { await store.bulk([...selected], action); setSelected(new Set()); setSelecting(false); };
   const title = view === "smart" ? (smart?.name ?? "Smart decks") : node!.name;
   if (tool === "dupes") return <Duplicates onClose={() => setTool(null)} />;
@@ -212,7 +213,11 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           <button className="btn" onClick={() => setMoveTo("")}>Move</button>
           <button className="btn" onClick={() => setClassify("System")}>System</button>
           <button className="btn" onClick={() => setClassify("Specialty")}>Specialty</button>
+          <button className="btn danger" onClick={async () => { const nids = [...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])]; if (!confirm(`Delete ${nids.length.toLocaleString()} note${nids.length === 1 ? "" : "s"} and all their cards? Review history goes too.`)) return; const n = await store.deleteNotes(nids); setSelected(new Set()); setSelecting(false); setDeleted(n); }}>Delete</button>
         </div>
+      )}
+      {deleted > 0 && store.lastDeleted && (
+        <div className="bulk-bar"><span className="small grow">Deleted {deleted.toLocaleString()} note{deleted === 1 ? "" : "s"}</span><button className="btn" onClick={async () => { await store.undoDelete(); setDeleted(0); }}>Undo</button><button className="btn" onClick={() => setDeleted(0)}>OK</button></div>
       )}
       {tagTo !== null && (
         <div className="sheet-backdrop" onClick={() => setTagTo(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>

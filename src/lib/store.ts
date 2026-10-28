@@ -628,6 +628,23 @@ export class Store {
     this.inbox = this.inbox.filter((x) => x.sha !== sha); await db.setMeta("inbox", this.inbox); this.bump();
     if (this.syncConfigured()) { const cfg = this.settings.sync; await new GitHubSync({ owner: cfg.owner, repo: cfg.repo, token: cfg.token }).deleteInbox(e.file, e.sha).catch(() => {}); }
   }
+  /** Delete notes with all their cards (synced; later Anki imports don't bring them back). Returns the last deletion for undo. */
+  lastDeleted: { notes: Note[]; cards: Card[] } | null = null;
+  async deleteNotes(nids: string[]) {
+    const now = stamp(); const notes: Note[] = [], cards: Card[] = [];
+    for (const nid of new Set(nids)) { const n = this.notes.get(nid); if (!n) continue; notes.push(n); this.notes.delete(nid); this.tombstones["n:" + nid] = now; for (const c of this.cardsOfNote(nid)) { cards.push(c); this.cards.delete(c.id); } }
+    if (!notes.length) return 0;
+    this.lastDeleted = { notes, cards };
+    await this.persist("deleting", (async () => { await db.deleteMany("notes", notes.map((n) => n.id)); await db.deleteMany("cards", cards.map((c) => c.id)); await db.setMeta("tombstones", this.tombstones); })());
+    this.treeCache.clear(); this.bump(); this.touch(); return notes.length;
+  }
+  async undoDelete() {
+    const d = this.lastDeleted; if (!d) return 0; this.lastDeleted = null; const now = stamp();
+    const notes = d.notes.map((n) => ({ ...n, modified: now })), cards = d.cards.map((c) => ({ ...c, mod: now }));
+    for (const n of notes) { this.notes.set(n.id, n); delete this.tombstones["n:" + n.id]; } for (const c of cards) { this.cards.set(c.id, c); delete this.tombstones["c:" + c.id]; }
+    await this.persist("restoring", (async () => { await db.putMany("notes", notes); await db.putMany("cards", cards); await db.setMeta("tombstones", this.tombstones); })());
+    this.treeCache.clear(); this.bump(); this.touch(); return notes.length;
+  }
   /** Remove every note a pack added (cards and history go with them). */
   async removePack(id: string) {
     const e = this.packLog.find((x) => x.id === id); if (!e) return 0;
