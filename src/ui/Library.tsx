@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { store, VIEWS, type TreeNode, type View, type SmartDeck } from "../lib/store";
 import { noteTitle, renderCard } from "../lib/render";
-import { CardView } from "./Study";
+import { CardView, CardInfo, type StudyScope } from "./Study";
 import { SYSTEM_NAMES } from "../lib/classify";
 import type { Card, CardState } from "../lib/model";
 import { IconChevron, IconPlay, IconClose, IconPin, IconEdit } from "./icons";
@@ -28,16 +28,31 @@ function findNode(root: TreeNode, path: string): TreeNode | null {
   return n;
 }
 
-function Preview({ card, onClose }: { card: Card; onClose: () => void }) {
-  useBack(true, onClose);
-  const note = store.noteFor(card)!; const nt = store.notetypeFor(note)!;
+function Preview({ card: card0, onClose, onStudy }: { card: Card; onClose: () => void; onStudy: (cards: Card[], title: string) => void }) {
+  const [sub, setSub] = useState<null | "edit" | "improve">(null);
+  useBack(true, onClose); // the editor and the improve sheet stack their own back step on top of this one
+  store.getVersion(); const card = store.cards.get(card0.id) ?? card0; // live: edits, flags and pauses show at once
+  const note = store.noteFor(card); const nt = note && store.notetypeFor(note);
+  if (!note || !nt) return null; // deleted meanwhile
   const r = renderCard({ note, notetype: nt, ord: card.ord, deck: card.source, resolveMedia: store.mediaUrl });
+  const mark = store.improveFor(note.id);
+  if (sub === "edit") return <CardInfo card={card} onClose={() => setSub(null)} onSaved={() => setSub(null)} />;
+  if (sub === "improve") return <ImproveSheet nids={[note.id]} onClose={() => setSub(null)} />;
   return (
     <div className="sheet-backdrop" onClick={onClose}><div className="sheet" onClick={(e) => e.stopPropagation()}>
-      <div className="row" style={{ marginBottom: 8 }}><b className="grow">Preview</b><span className="chip">{card.suspended ? "suspended" : card.state}</span><button className="icon-btn" aria-label="Close preview" onClick={onClose}><IconClose /></button></div>
+      <div className="row" style={{ marginBottom: 8 }}><b className="grow">Preview</b>{card.flag ? <span className="chip orange">flagged</span> : null}{mark ? <span className="chip orange">to improve</span> : null}<span className="chip">{card.suspended ? "paused" : card.state}</span><button className="icon-btn" aria-label="Close preview" onClick={onClose}><IconClose /></button></div>
       <div className="paper slate" style={{ "--tilt": "0deg", "--spine": systemColor(note.tags.find((t) => t.startsWith("auto::System::"))?.slice(14)) } as any}><CardView html={r.back} css={r.css} dark side="back" /></div>
-      <p className="small muted">{card.source}{note.tags.length ? " · " + note.tags.filter((t) => !t.startsWith("auto::")).join(", ") : ""}</p>
-      <div className="row"><button className="btn grow" onClick={async () => { await store.setSuspended(card.id, !card.suspended); onClose(); }}>{card.suspended ? "Unsuspend" : "Suspend"}</button><button className="btn grow" onClick={async () => { await store.setFlag(card.id, card.flag ? 0 : 1); onClose(); }}>{card.flag ? "Unflag" : "Flag"}</button></div>
+      <p className="small muted">{card.source}{note.tags.length ? " · " + note.tags.filter((t) => !t.startsWith("auto::")).join(", ") : ""}{mark ? ` · to improve: ${mark.r.join(", ")}${mark.t ? ` — “${mark.t}”` : ""}` : ""}</p>
+      <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+        <button className="btn primary grow" onClick={() => onStudy([card], "This card")}><IconPlay /> Study</button>
+        <button className="btn grow" onClick={() => setSub("edit")}><IconEdit /> Edit</button>
+        <button className="btn grow" onClick={() => setSub("improve")}>{mark ? "Change improve mark" : "Needs improving"}</button>
+      </div>
+      <div className="row" style={{ flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+        <button className="btn grow" onClick={() => store.setFlag(card.id, card.flag ? 0 : 1)}>{card.flag ? "Unflag" : "Flag"}</button>
+        <button className="btn grow" onClick={() => store.setSuspended(card.id, !card.suspended)}>{card.suspended ? "Unpause" : "Pause"}</button>
+        <button className="btn danger grow" onClick={async () => { const n = store.cardsOfNote(note.id).length; if (!confirm(n > 1 ? `Delete this note and its ${n} cards? Review history goes too.` : "Delete this card? Review history goes too.")) return; await store.deleteNotes([note.id]); onClose(); }}>Delete</button>
+      </div>
     </div></div>
   );
 }
@@ -68,7 +83,7 @@ function SmartEditor({ initial, onClose }: { initial?: SmartDeck; onClose: () =>
   );
 }
 
-export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, view: View, extra?: { only?: "all" | "due" | "new" }) => void; onBoss: (path: string, view: View, name: string) => void; initial?: { view: View; path: string; query?: string; n: number } | null }) {
+export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, view: View, extra?: Partial<StudyScope>) => void; onBoss: (path: string, view: View, name: string) => void; initial?: { view: View; path: string; query?: string; n: number } | null }) {
   const [view, setView] = useState<View>(initial?.view ?? "decks");
   const [path, setPath] = useState(initial?.path ?? "");
   useEffect(() => { if (initial) { setView(initial.view); setPath(initial.path); setQuery(initial.query ?? ""); setShowCards(!!initial.query); } }, [initial?.n]);
@@ -207,6 +222,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
             <>
               <div className="row" style={{ marginTop: 18 }}>
                 <h2 className="grow" style={{ margin: 0 }}>{matches.length.toLocaleString()} cards{matches.length > 300 ? ", first 300 shown" : ""}</h2>
+                {matches.length > 0 && !selecting && <button className="chip orange" onClick={() => { const pool = only ? scopeCards.filter((c) => passes(c, only) && (!q || store.searchText(store.noteFor(c)!).includes(q))) : matches; onStudy(path, view, { preset: pool.filter((c) => only === "suspended" || !c.suspended).slice(0, 500), title: only ? { flagged: "Flagged cards", improve: "Cards to improve", leech: "Leeches", suspended: "Paused cards" }[only] : `“${query}”` }); }}><IconPlay /> Study these</button>}
                 <select className="chip" value={sort} onChange={(e) => setSort(e.target.value as any)} aria-label="Sort"><option value="due">by due</option><option value="new">newest</option><option value="state">by state</option><option value="deck">by deck</option></select>
                 <button className="chip" onClick={() => { setSelecting(!selecting); setSelected(new Set()); }}>{selecting ? "Cancel" : "Select"}</button>
                 {selecting && <button className="chip" onClick={() => setSelected(new Set(matches.map((c) => c.id)))}>All {matches.length.toLocaleString()}</button>}
@@ -232,6 +248,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           <button className="btn" onClick={() => setMoveTo("")}>Move</button>
           <button className="btn" onClick={() => setClassify("System")}>System</button>
           <button className="btn" onClick={() => setClassify("Specialty")}>Specialty</button>
+          <button className="btn primary" onClick={() => { const cards = [...selected].map((id) => store.cards.get(id)!).filter(Boolean); setSelecting(false); setSelected(new Set()); onStudy(path, view, { preset: cards, title: `${cards.length} selected` }); }}>Study</button>
           <button className="btn" onClick={() => setImproveFor([...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])])}>Needs improving</button>
           <button className="btn danger" onClick={async () => { const nids = [...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])]; if (!confirm(`Delete ${nids.length.toLocaleString()} note${nids.length === 1 ? "" : "s"} and all their cards? Review history goes too.`)) return; const n = await store.deleteNotes(nids); setSelected(new Set()); setSelecting(false); setDeleted({ n, token: store.lastDeleted }); }}>Delete</button>
         </div>
@@ -277,7 +294,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           <button className="btn block" style={{ marginTop: 10 }} onClick={() => setClassify(null)}>Done</button>
         </div></div>
       )}
-      {preview && <Preview card={preview} onClose={() => setPreview(null)} />}
+      {preview && <Preview card={preview} onClose={() => setPreview(null)} onStudy={(cards, t) => { setPreview(null); onStudy(path, view, { preset: cards, title: t }); }} />}
       {improveFor && <ImproveSheet nids={improveFor} onClose={() => { setImproveFor(null); setSelected(new Set()); setSelecting(false); }} />}
       {editSmart && <SmartEditor initial={editSmart === "new" ? undefined : editSmart} onClose={() => { setEditSmart(null); if (view === "smart" && path && !store.settings.smart.some((s) => s.id === path)) go(""); }} />}
     </div>

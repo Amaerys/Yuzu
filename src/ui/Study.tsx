@@ -100,7 +100,7 @@ function estimateSeconds(): number {
   return Math.round(rs[Math.floor(rs.length / 2)] / 1000);
 }
 
-function CardInfo({ card, onClose, onSaved, onTag }: { card: Card; onClose: () => void; onSaved: () => void; onTag?: (tag: string) => void }) {
+export function CardInfo({ card, onClose, onSaved, onTag }: { card: Card; onClose: () => void; onSaved: () => void; onTag?: (tag: string) => void }) {
   useBack(true, onClose);
   const note = store.noteFor(card)!;
   const nt = store.notetypeFor(note)!;
