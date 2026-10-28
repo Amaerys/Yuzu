@@ -104,7 +104,7 @@ button.chip:active:not(:disabled) { transform: translateY(1px); }
 .hero .lead { font-size: 15px; color: var(--muted); line-height: 1.4; }
 .hero .lead b { color: var(--text); font-weight: 600; }
 .big { font-size: 40px; line-height: 40px; font-variant-numeric: tabular-nums; }
-.stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 8px; margin-top: 10px; }
 .stat { background: var(--ink-2); border: 2px solid var(--line-soft); padding: 10px 12px; box-shadow: inset -2px -2px 0 rgba(0,0,0,.3); }
 .stat b { display: block; font-size: 20px; line-height: 20px; margin-bottom: 6px; color: var(--text); }
 .stat span { font-size: 12px; color: var(--muted); }

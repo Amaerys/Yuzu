@@ -42,7 +42,7 @@ const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x
 export function retrievability(elapsedDays: number, stability: number, w: number[] = active): number {
   if (stability <= 0) return 0;
   const { decay, factor } = decayOf(w);
-  return Math.pow(1 + factor * elapsedDays / stability, decay);
+  return Math.pow(1 + factor * Math.max(0, elapsedDays) / stability, decay); // a clock running ahead must not give NaN
 }
 export function intervalFor(stability: number, retention: number, maxDays: number, w: number[] = active): number {
   const { decay, factor } = decayOf(w);

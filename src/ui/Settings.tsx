@@ -25,7 +25,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
   const [mediaBusy, setMediaBusy] = useState(false);
   const [mediaFrac, setMediaFrac] = useState(0);
   const [quota, setQuota] = useState<{ used: number; free: number; persisted: boolean } | null>(null);
-  useEffect(() => { (async () => { try { const e = await navigator.storage?.estimate?.(); const p = (await navigator.storage?.persisted?.()) ?? false; if (e) setQuota({ used: e.usage ?? 0, free: Math.max(0, (e.quota ?? 0) - (e.usage ?? 0)), persisted: p }); } catch { /* not available */ } })(); }, [mediaMsg]);
+  useEffect(() => { (async () => { try { const e = await navigator.storage?.estimate?.(); const p = (await navigator.storage?.persisted?.()) ?? false; if (e) setQuota({ used: e.usage ?? 0, free: Math.max(0, (e.quota ?? 0) - (e.usage ?? 0)), persisted: p }); } catch { /* not available */ } })(); }, [mediaBusy]);
   async function onMedia(input: File | File[] | { handles: Map<string, { getFile(): Promise<File> }> }) {
     setBusy(true); setMediaBusy(true); setMediaMsg(""); setMediaFrac(0); stopRef.current = new AbortController();
     try {
@@ -36,7 +36,8 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
     finally { setBusy(false); setMediaBusy(false); stopRef.current = null; if (mediaRef.current) mediaRef.current.value = ""; if (folderRef.current) folderRef.current.value = ""; }
   }
   async function hasMedia(file: Blob) { try { const z = new ZipFile(file, inflateRaw); const l = await z.list(); return l.length > 3 && l.some((e) => e.name === "media"); } catch { return false; } }
-  const canPickDir = typeof (window as any).showDirectoryPicker === "function";
+  // Folder access is for the PC: phones (touch screens) can't reach Anki's media folder even if the browser offers a picker.
+  const canPickDir = typeof (window as any).showDirectoryPicker === "function" && !window.matchMedia?.("(pointer: coarse)").matches;
   const [ankiDir, setAnkiDir] = useState<{ name: string; handles: Map<string, { getFile(): Promise<File> }> } | null>(null);
   /** Open a folder with the File System Access API (PC Chrome/Edge): files are opened fresh when read. */
   async function pickAnkiFolder(): Promise<typeof ankiDir> {
@@ -82,13 +83,15 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
     setBusy(true); setMediaBusy(true); setMediaMsg(dir ? `Saving into “${dir.name}”` : "Packing"); setMediaFrac(0);
     try {
       const { files, skipped } = await holdAwake(() => store.exportMedia((m) => setMediaMsg(m), dir));
-      if (!dir) for (const f of files) { const a = document.createElement("a"); a.href = URL.createObjectURL(f.blob!); a.download = f.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000); }
+      // Phones: one download per tap (Chrome blocks a burst of downloads from one tap).
+      if (!dir && files.length) { downloadBlob(files[0].blob!, files[0].name); setDlParts(files.length > 1 ? files.slice(1).map((f) => ({ name: f.name, blob: f.blob! })) : []); }
       const list = files.map((f) => `${f.name} (${(f.size / 1048576).toFixed(0)} MB)`).join(", ");
       setMediaMsg(files.length ? `Saved ${list}${dir ? ` in “${dir.name}”` : ""}. On the other device choose ${files.length > 1 ? "each file" : "it"} with “Choose file”.` + (skipped.length ? ` ${skipped.length.toLocaleString()} file${skipped.length === 1 ? "" : "s"} couldn't be read by the browser and ${skipped.length === 1 ? "was" : "were"} left out of the media file (nothing was deleted). “Check stored files” below can repair them.` : "") : "No media on this device yet.");
     } catch (e: any) { setMediaMsg("Failed: " + (e?.message ?? e)); }
     finally { setBusy(false); setMediaBusy(false); }
   }
   const [busy, setBusy] = useState(false);
+  const [dlParts, setDlParts] = useState<{ name: string; blob: Blob }[]>([]);
   const [msg, setMsg] = useState("");
   const [frac, setFrac] = useState(0);
   const [result, setResult] = useState<string>("");
@@ -100,7 +103,9 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
   const [revMsg, setRevMsg] = useState("");
   const [scan, setScan] = useState(0); // bump to rescan the collection-wide numbers below
   const reversible = useMemo(() => store.reversibleNotetypes(), [scan, revMsg]);
-  const mediaStat = useMemo(() => store.mediaStatus(), [scan, mediaMsg, result]);
+  const revOn = useMemo(() => new Map(reversible.map(({ nt, on }) => [nt.id, on && !store.cardsOfNoteType(nt.id, 1).every((c) => c.suspended)])), [reversible]);
+  const v = store.getVersion();
+  const mediaStat = useMemo(() => store.mediaStatus(), [scan, v, mediaBusy, result]); // not on every progress message: that rescans 78k files
   const askList = useMemo(() => [...store.notes.values()].filter((n) => n.tags.includes("ask-claude")), [scan, result]);
   const [showToken, setShowToken] = useState(false);
   const sy = s.sync;
@@ -175,12 +180,16 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.typeAnswers} onChange={(e) => store.saveSettings({ typeAnswers: e.target.checked })} /> Type the answer on language cards</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.burySiblings} onChange={(e) => store.saveSettings({ burySiblings: e.target.checked })} /> Bury siblings (don't show two cards of one note in a session)</label>
         <div className="field"><label>Offer to retire as mastered when the next review is more than</label>
-          <select value={s.retireAskYears ?? 5} onChange={(e) => store.saveSettings({ retireAskYears: Number(e.target.value) })}>
+          <select value={s.retireAskYears ?? 5} onChange={(e) => { const v = Number(e.target.value); store.saveSettings({ retireAskYears: v, ...((s.retireAutoYears ?? 20) && (s.retireAutoYears ?? 20) <= v ? { retireAutoYears: 0 } : {}) }); }}>
             {[1, 2, 3, 5, 7, 10].map((y) => <option key={y} value={y}>{y} year{y === 1 ? "" : "s"} away</option>)}
           </select></div>
         <div className="field"><label>Retire automatically when the next review is more than</label>
-          <select value={s.retireAutoYears ?? 20} onChange={(e) => { const v = Number(e.target.value); store.saveSettings({ retireAutoYears: v }); if (v) store.autoMaster(); }}>
-            {[0, 5, 10, 15, 20, 30].map((y) => <option key={y} value={y}>{y ? `${y} years away` : "Never (always ask)"}</option>)}
+          <select value={s.retireAutoYears ?? 20} onChange={async (e) => {
+            const v = Number(e.target.value);
+            if (v) { const n = store.countBeyond(v); if (n && !confirm(`${n.toLocaleString()} card${n === 1 ? " is" : "s are"} already past ${v} years and would be retired now (deleted, kept in the Mastered log). Go ahead?`)) return; }
+            await store.saveSettings({ retireAutoYears: v }); if (v) store.autoMaster();
+          }}>
+            {[0, 5, 10, 15, 20, 30].filter((y) => !y || y > (s.retireAskYears ?? 5)).map((y) => <option key={y} value={y}>{y ? `${y} years away` : "Never (always ask)"}</option>)}
           </select></div>
         <div className="field"><label>Streak rest days per week</label>
           <select value={s.restDays} onChange={(e) => store.saveSettings({ restDays: Number(e.target.value) })}>
@@ -197,7 +206,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         <div className="card-box">
           <p className="small muted" style={{ marginTop: 0 }}>Reverse cards ask the other direction (German → English as well as English → German). Turning one off suspends its reverse cards; history is kept.</p>
           {reversible.map(({ nt, notes, on }) => (
-            <label key={nt.id} className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={on && !store.cardsOfNoteType(nt.id, 1).every((c) => c.suspended)} onChange={async (e) => { setRevMsg("Working…"); const n = await store.setReverse(nt.id, e.target.checked); setRevMsg(`${n?.toLocaleString()} reverse cards ${e.target.checked ? "added" : "suspended"}.`); }} /> {nt.name} <span className="muted">· {notes.toLocaleString()} notes</span></label>
+            <label key={nt.id} className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={revOn.get(nt.id) ?? false} onChange={async (e) => { setRevMsg("Working…"); const n = await store.setReverse(nt.id, e.target.checked); setRevMsg(`${n?.toLocaleString()} reverse cards ${e.target.checked ? "added" : "suspended"}.`); }} /> {nt.name} <span className="muted">· {notes.toLocaleString()} notes</span></label>
           ))}
           {revMsg && <p className="small muted" style={{ marginBottom: 0 }}>{revMsg}</p>}
         </div>
@@ -254,6 +263,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           )}
           {canPickDir && <AutoSend busy={busy} />}
           {mediaMsg && <p className="small" style={{ marginBottom: 0 }}>{mediaMsg}</p>}
+          {dlParts.length > 0 && <div className="row" style={{ flexWrap: "wrap", gap: 6, marginTop: 6 }}>{dlParts.map((p) => <button key={p.name} className="btn" onClick={() => { downloadBlob(p.blob, p.name); setDlParts((x) => x.filter((y) => y.name !== p.name)); }}>Download {p.name}</button>)}</div>}
           <details className="how"><summary className="small">How to bring your Anki media in</summary>
             <ol className="small muted">
               <li><b>Phone only:</b> in AnkiDroid or Anki, export your collection as <b>.colpkg</b> with <b>“Include media”</b> ticked, then choose that file here. Big libraries take a while; you can stop and run it again — it continues where it left off.</li>
@@ -325,8 +335,8 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       <div className="card-box">
         <div className="small muted">{store.notes.size.toLocaleString()} notes · {store.cards.size.toLocaleString()} cards · {store.reviews.length.toLocaleString()} reviews on this device. A quick backup holds only what cannot be rebuilt (reviews, scheduling, settings, your hooks; about 1 MB); the full one includes every card's text.</div>
         <div className="row" style={{ marginTop: 10 }}>
-          <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.quickBackup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-quick-${new Date().toISOString().slice(0, 10)}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Quick backup</button>
-          <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Full backup</button>
+          <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.quickBackup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-quick-${dmy()}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Quick backup</button>
+          <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${dmy()}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Full backup</button>
           <button className="btn grow" onClick={() => restoreRef.current?.click()}>Restore backup</button>
           <input ref={restoreRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; try { const r = await store.restore(JSON.parse(await f.text())); setResult(`Restored: ${r.cards} cards, ${r.notes} notes and ${r.reviews} reviews merged.`); } catch (err: any) { setResult("Restore failed: " + err.message); } e.target.value = ""; }} />
         </div>
@@ -364,15 +374,15 @@ function Diagnostics() {
 /** The full list of files the cards use that this device doesn't have, by deck, with a CSV to check against Anki. */
 function MissingMedia() {
   const [list, setList] = useState<ReturnType<typeof store.missingMedia> | null>(null);
-  const byDeck = useMemo(() => { const m = new Map<string, NonNullable<typeof list>>(); for (const x of list ?? []) { const k = x.deck.split("::").slice(0, 4).join(" › ") || "(no deck)"; m.set(k, [...(m.get(k) ?? []), x]); } return [...m].sort((a, b) => b[1].length - a[1].length); }, [list]);
+  const byDeck = useMemo(() => { const m = new Map<string, NonNullable<typeof list>>(); for (const x of list ?? []) { const k = x.deck.split("::").slice(0, 4).join(" › ") || "(no deck)"; (m.get(k) ?? m.set(k, []).get(k)!).push(x); } return [...m].sort((a, b) => b[1].length - a[1].length); }, [list]);
   function saveCsv() {
     const q = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`;
     const rows = [["file", "type", "notes using it", "deck", "example card text", "note id"].map(q).join(","), ...(list ?? []).map((x) => [x.name, x.kind, x.notes, x.deck, x.example, x.noteId].map(q).join(","))];
     const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob(["\ufeff" + rows.join("\r\n")], { type: "text/csv" }));
-    a.download = `yuzu-missing-media-${((d) => `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`)(new Date())}.csv`; document.body.appendChild(a); a.click(); a.remove();
+    a.download = `yuzu-missing-media-${dmy()}.csv`; document.body.appendChild(a); a.click(); a.remove();
   }
   return (
-    <details className="how" onToggle={(e) => { if ((e.target as HTMLDetailsElement).open && !list) setList(store.missingMedia()); }}>
+    <details className="how" onToggle={(e) => { if ((e.target as HTMLDetailsElement).open && !list) setTimeout(() => setList(store.missingMedia()), 30); }}>
       <summary className="small">Show what's missing</summary>
       {!list ? <p className="small muted">Looking…</p> : (<>
         <p className="small muted">{list.length.toLocaleString()} files ({list.filter((x) => x.kind === "image").length.toLocaleString()} images, {list.filter((x) => x.kind === "sound").length.toLocaleString()} sounds, {list.filter((x) => x.kind === "other").length.toLocaleString()} other). If Anki's <b>Tools → Check Media</b> lists the same names under “Missing”, they are missing in Anki too and nothing on this device can fix them.</p>
@@ -409,18 +419,26 @@ function AutoSend({ busy }: { busy: boolean }) {
 
 /** Workload vs recall target from a simulated year with the user's own weights, answer times and daily new cards. */
 function Tradeoff() {
-  const [rows, setRows] = useState<ReturnType<typeof retentionTradeoff>["curve"] | null>(null);
   const s = store.settings; const perDay = Math.max(1, s.newPerDay || 10);
-  const show = [0.8, 0.85, 0.87, 0.88, 0.9, 0.92, 0.95];
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState<{ key: string; curve: Awaited<ReturnType<typeof retentionTradeoff>>["curve"] } | null>(null);
+  const key = `${perDay}:${s.scheduler.w.join(",")}:${store.reviews.length >> 9}`; // redo when the inputs change (or every ~500 reviews)
+  useEffect(() => {
+    if (!open || rows?.key === key) return; let live = true;
+    retentionTradeoff(s.scheduler.w, store.reviews, { perDay, from: 0.8, to: 0.95 }).then((r) => { if (live) setRows({ key, curve: r.curve }); });
+    return () => { live = false; };
+  }, [open, key]);
+  const show = [0.8, 0.82, 0.85, 0.87, 0.88, 0.9, 0.92, 0.95];
+  const cur = s.scheduler.desiredRetention;
   return (
-    <details className="how" onToggle={(e) => { if ((e.target as HTMLDetailsElement).open && !rows) setTimeout(() => setRows(retentionTradeoff(s.scheduler.w, store.reviews, { perDay, from: 0.8, to: 0.95 }).curve), 30); }}>
+    <details className="how" onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
       <summary className="small">What each choice costs you</summary>
-      {!rows ? <p className="small muted">Working it out from your reviews…</p> : (<>
+      {!rows || rows.key !== key ? <p className="small muted">Working it out from your reviews…</p> : (<>
         <table className="small" style={{ borderCollapse: "collapse", width: "100%", marginTop: 6 }}>
           <thead><tr><th style={{ textAlign: "left" }}>Target</th><th style={{ textAlign: "right" }}>Study / day</th><th style={{ textAlign: "right" }}>Still remembered after a year</th></tr></thead>
-          <tbody>{rows.filter((r) => show.some((x) => Math.abs(x - r.r) < 0.001)).map((r) => (
-            <tr key={r.r} style={Math.abs(r.r - s.scheduler.desiredRetention) < 0.001 ? { color: "var(--orange)", fontWeight: 700 } : undefined}>
-              <td>{Math.round(r.r * 100)}%{Math.abs(r.r - s.scheduler.desiredRetention) < 0.001 ? " (now)" : ""}</td><td style={{ textAlign: "right" }}>{r.minutesPerDay.toFixed(0)} min</td><td style={{ textAlign: "right" }}>{Math.round(r.rememberedShare * 100)}%</td>
+          <tbody>{rows.curve.filter((r) => show.some((x) => Math.abs(x - r.r) < 0.001)).map((r) => (
+            <tr key={r.r} style={Math.abs(r.r - cur) < 0.001 ? { color: "var(--orange)", fontWeight: 700 } : undefined}>
+              <td>{Math.round(r.r * 100)}%{Math.abs(r.r - cur) < 0.001 ? " (now)" : ""}</td><td style={{ textAlign: "right" }}>{r.minutesPerDay.toFixed(0)} min</td><td style={{ textAlign: "right" }}>{Math.round(r.rememberedShare * 100)}%</td>
             </tr>))}</tbody>
         </table>
         <p className="small muted" style={{ margin: "6px 0 0" }}>A simulated year of {perDay} new cards a day, with your tuned scheduler, your answer times and your Again/Hard/Good/Easy mix. Below ~85% you save time but forget more of what you've learned; above ~90% each extra point costs a lot more time. For medicine you need to recall reliably, 85–90% is the usual sweet spot.</p>
@@ -428,3 +446,8 @@ function Tradeoff() {
     </details>
   );
 }
+
+/** Today as dd-mm-yyyy for file names. */
+function dmy(d = new Date()) { return `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`; }
+
+function downloadBlob(blob: Blob, name: string) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 120000); }

@@ -93,12 +93,16 @@ interface Source { kind: "anki" | "yuzu" | "folder"; has(name: string): boolean;
  * while the file is "ecg.png"), %-encoded, or with stray spaces. Cards keep their own spelling.
  */
 export function forgiving<T>(m: Map<string, T>): (n: string) => T | undefined {
-  let loose: Map<string, T> | null = null;
-  const key = (n: string) => { let k = n.trim(); try { if (/%[0-9a-f]{2}/i.test(k)) k = decodeURIComponent(k); } catch { /* not encoded */ } return k.normalize("NFC").toLowerCase(); };
+  // Tried in order, most specific first: exact, other Unicode form, same letters ignoring case, then %-decoded.
+  let lower: Map<string, T> | null = null, decoded: Map<string, T> | null = null;
+  const low = (n: string) => n.trim().normalize("NFC").toLowerCase();
+  const dec = (n: string) => { let k = n.trim(); try { if (/%[0-9a-f]{2}/i.test(k)) k = decodeURIComponent(k); } catch { /* not encoded */ } return k.normalize("NFC").toLowerCase(); };
   return (n) => {
     const hit = m.get(n) ?? m.get(n.normalize("NFC")) ?? m.get(n.normalize("NFD")); if (hit !== undefined) return hit;
-    if (!loose) { loose = new Map(); for (const [k, v] of m) { const l = key(k); if (!loose.has(l)) loose.set(l, v); } }
-    return loose.get(key(n));
+    if (!lower) { lower = new Map(); for (const [k, v] of m) { const l = low(k); if (!lower.has(l)) lower.set(l, v); } }
+    const h2 = lower.get(low(n)); if (h2 !== undefined) return h2;
+    if (!decoded) { decoded = new Map(); for (const [k, v] of m) { const l = dec(k); if (!decoded.has(l)) decoded.set(l, v); } }
+    return decoded.get(dec(n));
   };
 }
 

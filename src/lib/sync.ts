@@ -39,7 +39,7 @@ export interface SyncSnapshot {
 }
 export interface MasteredEntry { id: string; nid: string; deck: string; front: string; back: string; tags: string[]; reps: number; lapses: number; firstReview: number; lastReview: number; intervalDays: number; at: number; by: "auto" | "you" }
 export interface MediaWant { id?: string; device: string; at: number; total: number; missing: string[] }
-const wantPath = (device: string) => { let h = 0x811c9dc5; for (let i = 0; i < device.length; i++) h = Math.imul(h ^ device.charCodeAt(i), 16777619); return `wants/${(h >>> 0).toString(16).padStart(8, "0")}.json`; };
+export const wantPath = (device: string) => { let h = 0x811c9dc5; for (let i = 0; i < device.length; i++) h = Math.imul(h ^ device.charCodeAt(i), 16777619); return `wants/${(h >>> 0).toString(16).padStart(8, "0")}.json`; };
 export type MediaIndex = NonNullable<SyncSnapshot["mediaIndex"]>;
 /** Per sync, at most this many bytes of shared images go up or come down, so a sync never takes minutes. */
 export const MEDIA_BATCH_BYTES = 15 * 1048576;

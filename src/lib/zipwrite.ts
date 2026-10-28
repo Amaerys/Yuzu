@@ -64,11 +64,22 @@ export async function streamZip(files: ZipInput[], out: { write(c: Uint8Array | 
  */
 export class ZipParts {
   private chain: Promise<unknown> = Promise.resolve();
-  private out: { write(c: Uint8Array): Promise<void>; close(): Promise<void> } | null = null;
+  private out: { write(c: Uint8Array): Promise<void>; close(): Promise<void>; abort?(): Promise<void> } | null = null;
+  private broken: unknown = null;
   private cd: Uint8Array[] = []; private offset = 0; private count = 0; private part = 0;
   readonly parts: { name: string; size: number; files: number }[] = [];
-  constructor(private openPart: (n: number) => Promise<{ name: string; write(c: Uint8Array): Promise<void>; close(): Promise<void> }>, private first?: ZipInput & { data: Uint8Array }, private limit = 1800 * 1048576, private maxFiles = 60000) {}
-  add(name: string, data: Uint8Array): Promise<void> { const p = this.chain.then(() => this.write(name, data)); this.chain = p.catch(() => {}); return p; }
+  constructor(private openPart: (n: number) => Promise<{ name: string; write(c: Uint8Array): Promise<void>; close(): Promise<void>; abort?(): Promise<void> }>, private first?: ZipInput & { data: Uint8Array }, private limit = 1800 * 1048576, private maxFiles = 60000) {}
+  /** Add one file. A write error (disk full, folder gone) is fatal: every later add fails at once with the same reason. */
+  add(name: string, data: Uint8Array): Promise<void> {
+    const p = this.chain.then(async () => {
+      if (this.broken) throw this.broken;
+      try { await this.write(name, data); }
+      catch (e: any) { this.broken = Object.assign(new Error(`Couldn't write the media file (${e?.name ?? "Error"}${e?.message ? ": " + e.message : ""}). Is the disk full?`), { fatal: true, cause: e }); throw this.broken; }
+    });
+    this.chain = p.catch(() => {}); return p;
+  }
+  /** Give up on the open part (the browser discards its temporary file). */
+  async abort() { await this.chain; const o = this.out; this.out = null; if (o) { try { await (o.abort ? o.abort() : o.close()); } catch { /* already closed */ } if (this.parts.length) this.parts.pop(); } }
   private async open() {
     const o = await this.openPart(++this.part); this.out = o; this.cd = []; this.offset = 0; this.count = 0;
     this.parts.push({ name: o.name, size: 0, files: 0 });
@@ -97,5 +108,5 @@ export class ZipParts {
     ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, this.count, true); ev.setUint16(10, this.count, true); ev.setUint32(12, cdLen, true); ev.setUint32(16, this.offset, true);
     await this.out.write(eocd); await this.out.close(); this.parts[this.parts.length - 1].size = this.offset + cdLen + 22; this.out = null;
   }
-  async finish() { await this.chain; await this.closePart(); return this.parts; }
+  async finish() { await this.chain; if (this.broken) { await this.abort(); throw this.broken; } await this.closePart(); return this.parts; }
 }

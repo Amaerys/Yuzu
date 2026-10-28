@@ -116,3 +116,11 @@ test("media: an unreadable stored file is re-read, then skipped — the save sti
   assert.equal(n, 3); assert.deepEqual(sk2, ["m/a.mp3"]);
   assert.deepEqual(new Uint8Array(await new Blob(chunks).arrayBuffer()), new Uint8Array(await blob.arrayBuffer()));
 });
+
+test("media: forgiving names prefer the closest spelling", async () => {
+  const { forgiving } = await import("../src/import/media.ts");
+  const f = forgiving(new Map([["a%20b.png", 1], ["a b.png", 2], ["ECG.png", 3], ["ecg.PNG", 4]]));
+  assert.equal(f("a%20b.PNG"), 1); // same letters, case aside — not the %-decoded neighbour
+  assert.equal(f("A B.png"), 2); assert.equal(f("ecg.PNG"), 4); assert.equal(f("Ecg.png"), 3);
+  assert.equal(f("x.png"), undefined);
+});

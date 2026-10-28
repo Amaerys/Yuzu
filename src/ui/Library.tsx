@@ -110,13 +110,14 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   }, [scopeCards, showCards, q, sort]);
   const list = useMemo(() => matches.slice(0, 300).map((c) => { const n = store.noteFor(c)!; return { card: c, title: noteTitle(n, store.notetypeFor(n)), state: c.suspended ? "suspended" : c.state }; }), [matches]);
 
+  // Hooks first, always in the same order (the empty-library screen below returns early).
+  const go = (p: string) => { setPath(p); setShowCards(false); setSelecting(false); setSelected(new Set()); };
+  useBack(!!path, () => go(path.split("::").slice(0, -1).join("::")));
+  const [deleted, setDeleted] = useState<{ n: number; token: unknown } | null>(null);
+
   if (store.cards.size === 0) {
     return (<div className="screen"><h1>Library</h1><div className="empty">No cards yet. Import your Anki collection from Settings.</div></div>);
   }
-
-  const go = (p: string) => { setPath(p); setShowCards(false); setSelecting(false); setSelected(new Set()); };
-  useBack(!!path, () => go(path.split("::").slice(0, -1).join("::")));
-  const [deleted, setDeleted] = useState(0);
   const doBulk = async (action: Parameters<typeof store.bulk>[1]) => { await store.bulk([...selected], action); setSelected(new Set()); setSelecting(false); };
   const title = view === "smart" ? (smart?.name ?? "Smart decks") : node!.name;
   if (tool === "dupes") return <Duplicates onClose={() => setTool(null)} />;
@@ -213,11 +214,11 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           <button className="btn" onClick={() => setMoveTo("")}>Move</button>
           <button className="btn" onClick={() => setClassify("System")}>System</button>
           <button className="btn" onClick={() => setClassify("Specialty")}>Specialty</button>
-          <button className="btn danger" onClick={async () => { const nids = [...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])]; if (!confirm(`Delete ${nids.length.toLocaleString()} note${nids.length === 1 ? "" : "s"} and all their cards? Review history goes too.`)) return; const n = await store.deleteNotes(nids); setSelected(new Set()); setSelecting(false); setDeleted(n); }}>Delete</button>
+          <button className="btn danger" onClick={async () => { const nids = [...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])]; if (!confirm(`Delete ${nids.length.toLocaleString()} note${nids.length === 1 ? "" : "s"} and all their cards? Review history goes too.`)) return; const n = await store.deleteNotes(nids); setSelected(new Set()); setSelecting(false); setDeleted({ n, token: store.lastDeleted }); }}>Delete</button>
         </div>
       )}
-      {deleted > 0 && store.lastDeleted && (
-        <div className="bulk-bar"><span className="small grow">Deleted {deleted.toLocaleString()} note{deleted === 1 ? "" : "s"}</span><button className="btn" onClick={async () => { await store.undoDelete(); setDeleted(0); }}>Undo</button><button className="btn" onClick={() => setDeleted(0)}>OK</button></div>
+      {deleted && deleted.n > 0 && store.lastDeleted === deleted.token && (
+        <div className="bulk-bar"><span className="small grow">Deleted {deleted.n.toLocaleString()} note{deleted.n === 1 ? "" : "s"}</span><button className="btn" onClick={async () => { await store.undoDelete(); setDeleted(null); }}>Undo</button><button className="btn" onClick={() => setDeleted(null)}>OK</button></div>
       )}
       {tagTo !== null && (
         <div className="sheet-backdrop" onClick={() => setTagTo(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>

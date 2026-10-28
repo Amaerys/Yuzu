@@ -10,7 +10,7 @@ import { stamp, observe } from "./clock";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
 import { writeZip, streamZip, ZipParts } from "./zipwrite";
-import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
+import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
 export interface Settings {
   newPerDay: number;
@@ -134,7 +134,8 @@ export class Store {
   subscribe = (l: Listener) => { this.listeners.add(l); return () => { this.listeners.delete(l); }; };
   getVersion = () => this.version;
   private bump() { this.version++; this.treeCache.clear(); for (const l of this.listeners) l(); }
-  private touch() { if (!this.dirty) { this.dirty = true; db.setMeta("syncDirty", true).catch(() => {}); } this.scheduleSync(); }
+  private edits = 0; // bumps on every local change, so a sync can tell whether something happened while it uploaded
+  private touch() { this.edits++; if (!this.dirty) { this.dirty = true; db.setMeta("syncDirty", true).catch(() => {}); } this.scheduleSync(); }
 
   // ---- sync ---------------------------------------------------------------
   hasUnsynced(): boolean { return this.dirty; }
@@ -189,21 +190,23 @@ export class Store {
           if (got.notetypes) { for (const nt of got.notetypes) this.notetypes.set(nt.id, nt); await db.putMany("notetypes", got.notetypes); }
           if (got.tombstones) {
             this.tombstones = mergeTombstones(this.tombstones, got.tombstones); await db.setMeta("tombstones", this.tombstones);
-            const dn: string[] = [], dc: string[] = [];
+            const dn: string[] = [], dc: string[] = []; let byNote: Map<string, Card[]> | null = null;
             for (const [k, t] of Object.entries(got.tombstones)) {
-              if (k.startsWith("n:")) { const id = k.slice(2); const n = this.notes.get(id); if (n && n.modified <= t) { this.notes.delete(id); dn.push(id); for (const c of this.cards.values()) if (c.nid === id) { this.cards.delete(c.id); dc.push(c.id); } } }
+              if (k.startsWith("n:")) { const id = k.slice(2); const n = this.notes.get(id); if (n && n.modified <= t) { byNote ??= this.cardsByNote(); this.notes.delete(id); dn.push(id); for (const c of byNote.get(id) ?? []) { this.cards.delete(c.id); dc.push(c.id); } } }
               else if (k.startsWith("c:")) { const id = k.slice(2); const c = this.cards.get(id); if (c && (c.mod ?? c.lastReview) <= t) { this.cards.delete(id); dc.push(id); } }
             }
-            const dr = Object.keys(got.tombstones).filter((k) => k.startsWith("r:")).map((k) => k.slice(2)).filter((id) => this.reviews.some((r) => r.id === id));
+            const rids = new Set(this.reviews.map((r) => r.id));
+            const dr = Object.keys(got.tombstones).filter((k) => k.startsWith("r:")).map((k) => k.slice(2)).filter((id) => rids.has(id));
             if (dr.length) { const set = new Set(dr); this.reviews = this.reviews.filter((r) => !set.has(r.id)); await db.deleteMany("reviews", dr); }
-            if (dn.length) await db.deleteMany("notes", dn); if (dc.length) await db.deleteMany("cards", dc);
+            if (dn.length) await db.deleteMany("notes", dn); if (dc.length) { await db.deleteMany("cards", dc); this.dropUndo(new Set(dc)); }
           }
           if (got.notes) { const before = new Map(this.notes); pulledN = mergeNotes(this.notes, got.notes, this.tombstones); const changed = got.notes.filter((n) => this.notes.get(n.id) === n && before.get(n.id) !== n); await db.putMany("notes", changed); }
           if (got.cards) { const changed: Card[] = []; for (const c of got.cards) { const l = this.cards.get(c.id); if ((this.tombstones["c:" + c.id] ?? -1) >= (c.mod ?? c.lastReview) || (this.tombstones["n:" + c.nid] ?? -1) >= (c.mod ?? c.lastReview)) continue; if (!l || (c.mod ?? c.lastReview) > (l.mod ?? l.lastReview)) changed.push(c); } pulledC = mergeCards(this.cards, got.cards, this.tombstones); await db.putMany("cards", changed); }
           if (got.reviews) { const m = mergeReviews(this.reviews, got.reviews, this.tombstones); pulledR = m.added; if (m.added) { const ids = new Set(this.reviews.map((r) => r.id)); await db.putMany("reviews", got.reviews.filter((r) => !ids.has(r.id))); this.reviews = m.list; } }
           if (got.settings && (got.settings as any).updatedAt > ((this.settings as any).updatedAt ?? 0)) {
             const { sync: _s, deviceName: _d, nightCards: _n, swipe: _w, typeAnswers: _t, mediaDownload: _m, theme: _th, sfx: _sf, autoplay: _ap, cardStyle: _cs, ...rest } = got.settings as any; // per-device fields stay local
-            this.settings = { ...this.settings, ...rest }; this.settings.scheduler = { ...this.settings.scheduler, w: toFsrs6(this.settings.scheduler.w) }; setActiveWeights(this.settings.scheduler.w); await db.setMeta("settings", this.settings);
+            const oldW = (this.settings.scheduler.w?.length ?? 0) < 21 || ((rest as any).scheduler?.w?.length ?? 21) < 21;
+            this.settings = { ...this.settings, ...rest }; this.settings.scheduler = { ...this.settings.scheduler, w: toFsrs6(this.settings.scheduler.w) }; if (oldW) this.settings.fit = null; setActiveWeights(this.settings.scheduler.w); await db.setMeta("settings", this.settings);
           }
           if (got.mastery) {
             const ids = new Set(this.mastery.log.map((e) => e.id)); const log = [...this.mastery.log, ...got.mastery.log.filter((e) => !ids.has(e.id))];
@@ -222,17 +225,20 @@ export class Store {
           let budget = MEDIA_BATCH_BYTES; let total = Object.values(mediaIndex).reduce((a, v) => a + v.s, 0);
           for (const [name, blob] of this.media) {
             if (budget <= 0) break;
+            if (name.startsWith("pack-") || mediaIndex[name] || !/\.(png|jpe?g|gif|webp|svg|avif)$/i.test(name) || blob.size > 4 * 1048576) continue;
             if (total + blob.size > 900 * 1048576) { if (!this.mediaCapWarned) { this.mediaCapWarned = true; this.log(false, "Shared images reached 900 MB; further images stay on this device only", 0); } break; }
             total += blob.size;
-            if (name.startsWith("pack-") || mediaIndex[name] || !/\.(png|jpe?g|gif|webp|svg|avif)$/i.test(name) || blob.size > 4 * 1048576) continue;
             const ext = name.split(".").pop()!.toLowerCase(); const path = `media/${hashName(name)}.${blob.type === "image/webp" ? "webp" : ext}`;
             mediaBlobs.push({ path, bytes: new Uint8Array(await blob.arrayBuffer()) }); mediaIndex = { ...mediaIndex, [name]: { p: path, s: blob.size } }; budget -= blob.size;
           }
         }
         // Media wants: each device says which files its cards use that it lacks; a PC with Anki's folder linked sends them.
         const me = await this.deviceId(); const myName = this.settings.deviceName || "Another device";
+        // Other devices' lists are kept only while their file is in the repository: when a device stops wanting media it
+        // removes its own file, and nobody else puts it back (no ping-pong between devices).
+        const inRepo = new Set(Object.keys(remote?.files ?? {}));
         const wants: Record<string, MediaWant> = { ...(await db.getMeta<Record<string, MediaWant>>("mediaWants", {})), ...(got?.mediaWants ?? {}) };
-        for (const [k, w] of Object.entries(wants)) if (!w.id || (Date.now() - w.at > 60 * 86400000 && k !== me)) delete wants[k]; // (lists from the first version had no id)
+        for (const [k, w] of Object.entries(wants)) if (!w.id || (k !== me && !inRepo.has(wantPath(k)))) delete wants[k]; // (lists from the first version had no id)
         const dir = await this.ankiFolder();
         if (this.settings.mediaDownload && !dir) {
           const miss: string[] = []; let total = 0;
@@ -242,7 +248,7 @@ export class Store {
         // Senders: Anki's folder (PC, linked) or this device's own library (the phone as the master copy).
         if (dir || this.media.size) { const more = await this.sendWanted(dir, wants, me, mediaIndex, mediaBlobs, progress); mediaIndex = more.index; if (more.left) this.scheduleSync(4000); }
         this.mediaWants = wants;
-        progress("Preparing upload");
+        progress("Preparing upload"); const editsAtSnapshot = this.edits;
         if (!this.shardCache.size) { const saved = await db.getMeta<[string, { fp: string; hash: string }][]>("shardCache", []); for (const [k, v] of saved) this.shardCache.set(k, v); }
         const { hashes, make } = await GitHubSync.shard({
           notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(), mediaIndex, mediaWants: wants, mastery: this.mastery, hooks: this.hooks,
@@ -261,7 +267,7 @@ export class Store {
           await db.setMeta("syncKnown", res.manifest.files); await db.setMeta("syncSeenAt", res.manifest.updatedAt); await db.setMeta("mediaIndex", mediaIndex); await db.setMeta("mediaWants", wants);
           // Shared images missing here: fetch a batch now; the rest on the next sync.
           if (this.settings.mediaDownload) {
-            const missing = Object.entries(mediaIndex).filter(([name, v]) => v.p && !this.media.has(name)); let budget = MEDIA_BATCH_BYTES, done = 0; const got2: { name: string; blob: Blob }[] = [];
+            const used = this.mediaRefs(); const missing = Object.entries(mediaIndex).filter(([name, v]) => v.p && used.has(name) && !this.media.has(name)); let budget = MEDIA_BATCH_BYTES, done = 0; const got2: { name: string; blob: Blob }[] = [];
             const q = missing.filter(([, v]) => { if (budget - v.s < 0) return false; budget -= v.s; return true; });
             await Promise.all(Array.from({ length: 4 }, async () => { while (q.length) { const [name, v] = q.shift()!; try { const bytes = await gh.readBinary(v.p); if (bytes) { const blob = new Blob([bytes as BlobPart], { type: v.p.endsWith(".webp") ? "image/webp" : mimeFor(name) }); this.media.set(name, blob); got2.push({ name, blob }); } } catch { /* next time */ } progress(`Downloading images ${++done}/${q.length + done}`); } }));
             if (got2.length) { await db.putMany("media", got2); this.mediaUrls.clear(); }
@@ -269,7 +275,7 @@ export class Store {
             if (got2.length) this.log(true, `${got2.length} shared images and sounds downloaded`, 0);
           }
           await db.setMeta("shardCache", [...this.shardCache.entries()]);
-          this.dirty = false; await db.setMeta("syncDirty", false);
+          if (this.edits === editsAtSnapshot) { this.dirty = false; await db.setMeta("syncDirty", false); } else this.scheduleSync(3000); // changed during the upload: go again
           // Accuracy check: after a sync both sides must describe the same collection.
           const rc = res.manifest.counts;
           if (rc && !res.pushed && (rc.notes !== counts.notes || rc.cards !== counts.cards || rc.reviews !== counts.reviews)) {
@@ -444,7 +450,7 @@ export class Store {
     const lastAt = (await db.getMeta<{ at: number } | null>("lastImport", null))?.at ?? 0;
     const sameTags = (a: string[], b: string[]) => a.length === b.length && a.every((t, i) => t === b[i]);
     for (const n of res.notes) {
-      if (this.tombstones["n:" + n.id] !== undefined) continue; // merged or removed in Yuzu: stays gone even when Anki edits it later
+      if (this.tombstones["n:" + n.id] !== undefined && !this.notes.has(n.id)) continue; // merged or removed in Yuzu: stays gone even when Anki edits it later (unless restored)
       const existing = this.notes.get(n.id);
       if (!existing) { newNotes++; const m = { ...n, ankiMod: n.modified }; this.notes.set(n.id, m); notesOut.push(m); continue; }
       // Did Anki change the note since the version Yuzu has? Compare with Anki's own time, not Yuzu's
@@ -465,7 +471,7 @@ export class Store {
     }
     const knownReviewIds = new Set(this.reviews.map((r) => r.id));
     for (const c of res.cards) {
-      if (this.tombstones["c:" + c.id] !== undefined || this.tombstones["n:" + c.nid] !== undefined || !this.notes.has(c.nid)) continue;
+      if ((this.tombstones["c:" + c.id] !== undefined && !this.cards.has(c.id)) || !this.notes.has(c.nid)) continue;
       const existing = this.cards.get(c.id);
       if (!existing) { const to = mapDeck(c.source, this.settings.deckMap); const m = to ? { ...c, source: to } : c; this.cards.set(c.id, m); cardsOut.push(m); newCards++; if (to) organized++; continue; }
       // Whichever side has the more recent review keeps its scheduling state. Yuzu owns the category (source) once imported.
@@ -644,10 +650,15 @@ export class Store {
   }
   /** Delete notes with all their cards (synced; later Anki imports don't bring them back). Returns the last deletion for undo. */
   lastDeleted: { notes: Note[]; cards: Card[] } | null = null;
+  /** note id → its cards, built once (cardsOfNote scans all cards; fine for one note, not for thousands). */
+  private cardsByNote(): Map<string, Card[]> { const m = new Map<string, Card[]>(); for (const c of this.cards.values()) (m.get(c.nid) ?? m.set(c.nid, []).get(c.nid)!).push(c); return m; }
+  /** Forget review-undo entries for cards that no longer exist (↶ must never resurrect a deleted card). */
+  private dropUndo(cardIds: Set<string>) { if (this.undoStack.some((u) => cardIds.has(u.card.id))) { this.undoStack = this.undoStack.filter((u) => !cardIds.has(u.card.id)); db.setMeta("undoStack", this.undoStack).catch(() => {}); } }
   async deleteNotes(nids: string[]) {
-    const now = stamp(); const notes: Note[] = [], cards: Card[] = [];
-    for (const nid of new Set(nids)) { const n = this.notes.get(nid); if (!n) continue; notes.push(n); this.notes.delete(nid); this.tombstones["n:" + nid] = now; for (const c of this.cardsOfNote(nid)) { cards.push(c); this.cards.delete(c.id); } }
+    const now = stamp(); const notes: Note[] = [], cards: Card[] = []; const byNote = this.cardsByNote();
+    for (const nid of new Set(nids)) { const n = this.notes.get(nid); if (!n) continue; notes.push(n); this.notes.delete(nid); this.tombstones["n:" + nid] = now; for (const c of byNote.get(nid) ?? []) { cards.push(c); this.cards.delete(c.id); } }
     if (!notes.length) return 0;
+    this.dropUndo(new Set(cards.map((c) => c.id)));
     this.lastDeleted = { notes, cards };
     await this.persist("deleting", (async () => { await db.deleteMany("notes", notes.map((n) => n.id)); await db.deleteMany("cards", cards.map((c) => c.id)); await db.setMeta("tombstones", this.tombstones); })());
     this.treeCache.clear(); this.bump(); this.touch(); return notes.length;
@@ -686,29 +697,36 @@ export class Store {
   /** Retire cards as mastered: log what they were, then delete them (the note goes when its last card goes). Synced. */
   async masterCards(ids: string[], by: "auto" | "you") {
     const now = stamp(); const entries: MasteredEntry[] = []; const delCards: string[] = [], delNotes: string[] = [];
+    const want = new Set(ids); const firstSeen = new Map<string, number>();
+    for (const r of this.reviews) if (want.has(r.cid) && !firstSeen.has(r.cid)) firstSeen.set(r.cid, r.ts);
+    const left = new Map<string, number>(); for (const c of this.cards.values()) left.set(c.nid, (left.get(c.nid) ?? 0) + 1);
     for (const id of ids) {
       const c = this.cards.get(id); if (!c) continue; const n = this.notes.get(c.nid); const t = this.cardText(c);
-      const first = this.reviews.find((r) => r.cid === id)?.ts ?? 0;
+      const first = firstSeen.get(id) ?? 0;
       entries.push({ id, nid: c.nid, deck: c.source, front: t.front, back: t.back, tags: (n?.tags ?? []).filter((x) => !x.startsWith("auto::")).slice(0, 12), reps: c.reps, lapses: c.lapses, firstReview: first, lastReview: c.lastReview, intervalDays: Math.round(this.intervalDays(c)), at: now, by });
-      this.cards.delete(id); this.tombstones["c:" + id] = now; delCards.push(id);
-      if (n && this.cardsOfNote(n.id).length === 0) { this.notes.delete(n.id); this.tombstones["n:" + n.id] = now; delNotes.push(n.id); }
+      this.cards.delete(id); this.tombstones["c:" + id] = now; delCards.push(id); left.set(c.nid, (left.get(c.nid) ?? 1) - 1);
+      if (n && (left.get(n.id) ?? 0) <= 0) { this.notes.delete(n.id); this.tombstones["n:" + n.id] = now; delNotes.push(n.id); }
     }
     if (!entries.length) return 0;
+    this.dropUndo(new Set(delCards));
     this.mastery = { ...this.mastery, log: [...this.mastery.log, ...entries] };
     await this.persist("retiring mastered cards", (async () => { await db.deleteMany("cards", delCards); if (delNotes.length) await db.deleteMany("notes", delNotes); await db.setMeta("tombstones", this.tombstones); await db.setMeta("mastery", this.mastery); })());
     this.treeCache.clear(); this.bump(); this.touch();
     this.pruneMedia().catch(() => {}); // free the pictures and sounds only these cards used
     return entries.length;
   }
+  /** How many cards automatic retirement would take at `years` (for the confirmation before changing the setting). */
+  countBeyond(years: number) { const d = years * 365.25; let n = 0; for (const c of this.cards.values()) if (this.intervalDays(c) > d && !c.suspended && !this.mastery.kept[c.id]) n++; return n; }
   /** "Keep studying these": they leave the list for good. */
   async keepCards(ids: string[]) { const kept = { ...this.mastery.kept }; const now = stamp(); for (const id of ids) kept[id] = now; this.mastery = { ...this.mastery, kept }; await this.persist("saving", db.setMeta("mastery", this.mastery)); this.bump(); this.touch(); }
   /** Cards past 20 years retire on their own (run at start and after a sync, never mid-session so ↶ still works). */
-  async autoMaster() { const recent = Date.now() - 3600000; const ids = [...this.cards.values()].filter((c) => this.intervalDays(c) > this.autoDays && c.lastReview < recent).map((c) => c.id); return ids.length ? this.masterCards(ids, "auto") : 0; }
+  async autoMaster() { const recent = Date.now() - 3600000; const ids = [...this.cards.values()].filter((c) => this.intervalDays(c) > this.autoDays && c.lastReview < recent && !c.suspended && !this.mastery.kept[c.id]).map((c) => c.id); return ids.length ? this.masterCards(ids, "auto") : 0; }
   /** Remove every note a pack added (cards and history go with them). */
   async removePack(id: string) {
     const e = this.packLog.find((x) => x.id === id); if (!e) return 0;
-    const now = stamp(); const dc: string[] = [];
-    for (const nid of e.noteIds) { if (!this.notes.has(nid)) continue; this.notes.delete(nid); this.tombstones["n:" + nid] = now; for (const c of this.cardsOfNote(nid)) { this.cards.delete(c.id); dc.push(c.id); } }
+    const now = stamp(); const dc: string[] = []; const byNote = this.cardsByNote();
+    for (const nid of e.noteIds) { if (!this.notes.has(nid)) continue; this.notes.delete(nid); this.tombstones["n:" + nid] = now; for (const c of byNote.get(nid) ?? []) { this.cards.delete(c.id); dc.push(c.id); } }
+    this.dropUndo(new Set(dc));
     this.packLog = this.packLog.filter((x) => x.id !== id);
     await this.persist("removing the pack", (async () => { await db.deleteMany("notes", e.noteIds); await db.deleteMany("cards", dc); await db.setMeta("tombstones", this.tombstones); await db.setMeta("packLog", this.packLog); })());
     this.bump(); this.touch();
@@ -845,9 +863,10 @@ export class Store {
   async mediaFileFromFolder(src: FolderHandles, dest: any, env: MediaEnv) {
     const stampDate = ((d) => `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`)(new Date());
     const mark = new TextEncoder().encode(JSON.stringify({ yuzu_media: 1, at: Date.now() }));
-    const open = async (n: number) => { const name = `yuzu-media-${stampDate}-${n}.zip`; const fh = await dest.getFileHandle(name, { create: true }); const w = await fh.createWritable(); return { name, write: (c: Uint8Array) => w.write(c), close: () => w.close() }; };
+    const open = async (n: number) => { const name = `yuzu-media-${stampDate}-${n}.zip`; const fh = await dest.getFileHandle(name, { create: true }); const w = await fh.createWritable(); return { name, write: (c: Uint8Array) => w.write(c), close: () => w.close(), abort: () => w.abort() }; };
     const zip = new ZipParts(open, { name: YUZU_MEDIA_MARK, data: mark });
-    const r = await importMedia(src, this.notes.values(), () => false, async (name, blob) => { await zip.add("m/" + name, new Uint8Array(await blob.arrayBuffer())); }, env, { notetypes: this.notetypes.values(), skipField: this.skipHidden() });
+    let r; try { r = await importMedia(src, this.notes.values(), () => false, async (name, blob) => { await zip.add("m/" + name, new Uint8Array(await blob.arrayBuffer())); }, env, { notetypes: this.notetypes.values(), skipField: this.skipHidden() }); }
+    catch (e) { await zip.abort(); throw e; } // the finished parts stay; the half-written one is discarded
     const parts = await zip.finish();
     return { ...r, parts };
   }
@@ -1223,6 +1242,9 @@ export class Store {
     for (const [cid, list] of by) {
       const c = this.cards.get(cid); if (!c || c.state === "new") continue;
       const r = replay(c, list.sort((a, b) => a.ts - b.ts), this.settings.scheduler.w, this.settings.scheduler.desiredRetention);
+      // Only cards whose schedule really moved get a new edit time (so a re-tune never overrides another device's newer reviews).
+      if (Math.abs(r.due - c.due) < 3600000 && Math.abs(r.stability - c.stability) < 1e-3 && Math.abs(r.difficulty - c.difficulty) < 1e-3) continue;
+      if ((c.mod ?? 0) > (r.lastReview ?? 0) && c.lastReview > r.lastReview) continue; // has a review this replay doesn't know yet
       out.push({ ...r, suspended: c.suspended, flag: c.flag, source: c.source, mod: now });
     }
     for (const c of out) this.cards.set(c.id, c);

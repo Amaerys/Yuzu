@@ -52,8 +52,12 @@ export function logLoss(w: number[], samples: Sample[]): { loss: number; n: numb
 export interface FitResult { w: number[]; before: number; after: number; n: number; iterations: number }
 
 /** Fit weights starting from `start` (default FSRS-6). Needs enough data; returns the start weights otherwise. */
-export async function fit(reviews: Review[], start0: number[] = DEFAULT_W, opts: { iterations?: number; minSamples?: number; onProgress?: (i: number, loss: number) => void; yieldEvery?: number } = {}): Promise<FitResult> {
-  const samples = samplesFrom(reviews); const start = toFsrs6(start0);
+export async function fit(reviews: Review[], start0: number[] = DEFAULT_W, opts: { iterations?: number; minSamples?: number; onProgress?: (i: number, loss: number) => void; yieldEvery?: number; maxCards?: number } = {}): Promise<FitResult> {
+  // At most ~6,000 cards' histories (picked evenly, so the fit stays representative): enough for stable weights and
+  // keeps every pass short, so a phone with a million reviews never freezes. The loop yields to the UI often.
+  let samples = samplesFrom(reviews); const MAX = opts.maxCards ?? 6000;
+  if (samples.length > MAX) { const step = samples.length / MAX; samples = Array.from({ length: MAX }, (_, i) => samples[Math.floor(i * step)]); }
+  const start = toFsrs6(start0);
   const base = logLoss(start, samples);
   const iterations = opts.iterations ?? 120, minSamples = opts.minSamples ?? 400;
   if (base.n < minSamples) return { w: start, before: base.loss, after: base.loss, n: base.n, iterations: 0 };
@@ -70,6 +74,7 @@ export async function fit(reviews: Review[], start0: number[] = DEFAULT_W, opts:
       if (wp[k] === w[k]) { wp[k] = Math.max(LO[k], w[k] - h); }
       const fp = logLoss(wp, samples).loss;
       g[k] = wp[k] !== w[k] ? (fp - f0) / (wp[k] - w[k]) : 0;
+      if (opts.yieldEvery) await new Promise((r) => setTimeout(r, 0)); // one short pass at a time: the UI never waits long
     }
     for (const k of FIT) {
       m[k] = b1 * m[k] + (1 - b1) * g[k]; v[k] = b2 * v[k] + (1 - b2) * g[k] * g[k];
@@ -109,8 +114,10 @@ export function calibration(reviews: Review[], w: number[]): { bucket: string; p
  * weights, answer mix and answer times. Returns minutes per day and the share of everything learned that is still
  * remembered at the end. (Pure "remembered per minute" always favours ~70%; like current Anki, show the trade-off.)
  */
-export function retentionTradeoff(w0: number[], reviews: Review[], opts: { from?: number; to?: number; days?: number; perDay?: number } = {}) {
-  const w = toFsrs6(w0); const from = opts.from ?? 0.7, to = opts.to ?? 0.97, days = opts.days ?? 365, perDay = opts.perDay ?? 10;
+export async function retentionTradeoff(w0: number[], reviews: Review[], opts: { from?: number; to?: number; days?: number; perDay?: number } = {}) {
+  const w = toFsrs6(w0); const from = opts.from ?? 0.7, to = opts.to ?? 0.97, days = opts.days ?? 365, wanted = opts.perDay ?? 10;
+  // Workload grows in proportion to new cards a day, so simulate at most 15 a day and scale the minutes (keeps it fast).
+  const perDay = Math.min(15, wanted), scale = wanted / perDay;
   // The user's own costs and answer mix (sensible defaults until there is history).
   const med = (xs: number[], d: number) => { const v = xs.filter((x) => x > 500 && x < 120000).sort((a, b) => a - b); return v.length >= 30 ? v[Math.floor(v.length / 2)] / 1000 : d; };
   const rev = reviews.filter((r) => r.state === "review");
@@ -123,6 +130,7 @@ export function retentionTradeoff(w0: number[], reviews: Review[], opts: { from?
   const fN = firstMix.reduce((a, b) => a + b, 0); const pFirst = fN >= 50 ? firstMix.map((x) => x / fN) : [0.3, 0.1, 0.5, 0.1];
   const curve: { r: number; efficiency: number; minutesPerDay: number; remembered: number }[] = [];
   for (let target = from; target <= to + 1e-9; target += 0.01) {
+    await new Promise((r) => setTimeout(r, 0)); // one target at a time, so the screen stays responsive
     let seed = 12345; const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
     const pick = (ps: number[]) => { let u = rnd(); for (let i = 0; i < ps.length; i++) { u -= ps[i]; if (u <= 0) return i; } return ps.length - 1; };
     let cost = 0, known = 0;
@@ -139,7 +147,7 @@ export function retentionTradeoff(w0: number[], reviews: Review[], opts: { from?
         else { cost += forgetCost; m = updateMemory(w, card, 1, ivl); card = { ...m, reps: card.reps + 1 }; m = updateMemory(w, card, 3, 0); card = { ...m, reps: card.reps + 1 }; }
       }
     }
-    curve.push({ r: Math.round(target * 100) / 100, efficiency: known / cost, minutesPerDay: cost / days / 60, remembered: known });
+    curve.push({ r: Math.round(target * 100) / 100, efficiency: known / cost, minutesPerDay: (cost * scale) / days / 60, remembered: known * scale });
   }
-  return { curve: curve.map((c) => ({ ...c, rememberedShare: c.remembered / (days * perDay) })), costs: { recallCost, forgetCost, learnCost } };
+  return { curve: curve.map((c) => ({ ...c, rememberedShare: c.remembered / (days * wanted) })), costs: { recallCost, forgetCost, learnCost } };
 }

@@ -4,6 +4,7 @@ import { DAY } from "../scheduler/fsrs";
 import { systemColor } from "./theme";
 import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
+import { useBack } from "./useBack";
 
 const MASTERY: { key: "durable" | "mastered" | "developing" | "learning"; label: string; color: string }[] = [
   { key: "durable", label: "durable", color: "var(--yuzu)" }, { key: "mastered", label: "mastered", color: "var(--orange)" },
@@ -124,6 +125,7 @@ function Mastered() {
   const [open, setOpen] = useState<"list" | "log" | null>(null);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [q, setQ] = useState("");
+  useBack(open !== null, () => setOpen(null)); // Android back closes the sheet
   const monthAgo = Date.now() - 30 * 86400000;
   const byYou = log.filter((e) => e.by === "you").length, auto = log.length - byYou, recent = log.filter((e) => e.at > monthAgo).length;
   const ask = (store.settings.retireAskYears ?? 5) * 365.25;
