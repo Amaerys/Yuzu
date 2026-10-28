@@ -734,7 +734,11 @@ export class Store {
   /** Media the cards reference vs what this device holds. */
   private refsCache: { key: string; refs: Set<string> } | null = null;
   mediaRefs(): Set<string> {
-    const key = `${this.notes.size}:${this.version}:${this.settings.hiddenFields.join("|")}`;
+    // Re-scan only when card text can have changed: a cheap fingerprint of every note's edit time (a review or flag
+    // bumps the version but changes no fields — re-scanning 100k notes for that cost ~0.4 s on a PC, more on a phone).
+    let sig = 0; for (const n of this.notes.values()) sig = (sig + n.modified + n.fields.length) % 1e15;
+    let ntSig = 0; for (const nt of this.notetypes.values()) ntSig += nt.css.length + nt.templates.length;
+    const key = `${this.notes.size}:${sig}:${this.notetypes.size}:${ntSig}:${this.settings.hiddenFields.join("|")}`;
     if (this.refsCache?.key !== key) this.refsCache = { key, refs: mediaRefs(this.notes.values(), this.notetypes.values(), this.skipHidden()) };
     return this.refsCache.refs;
   }
@@ -1238,7 +1242,13 @@ export class Store {
     return "mastered";
   }
   /** Mastery distribution and average answer time (last 30 days) per system. */
+  private mbsCache: { v: number; at: number; out: ReturnType<Store["masteryBySystemRaw"]> } | null = null;
+  /** Per-system mastery (cached for a minute per data version: Today and Progress both ask on every render). */
   masteryBySystem(now = Date.now()) {
+    const c = this.mbsCache; if (c && c.v === this.version && Math.abs(now - c.at) < 60000) return c.out;
+    const out = this.masteryBySystemRaw(now); this.mbsCache = { v: this.version, at: now, out }; return out;
+  }
+  private masteryBySystemRaw(now: number) {
     const out = new Map<string, { unseen: number; learning: number; developing: number; mastered: number; durable: number; total: number; secs: number | null }>();
     const get = (k: string) => out.get(k) ?? out.set(k, { unseen: 0, learning: 0, developing: 0, mastered: 0, durable: 0, total: 0, secs: null }).get(k)!;
     for (const c of this.cards.values()) {
