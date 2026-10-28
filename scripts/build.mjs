@@ -1,4 +1,4 @@
-// Build Yuzu into dist/: bundle with esbuild, hash assets, fill index.html and sw.js.
+// Build Yuzu into docs/ (served by GitHub Pages): bundle with esbuild, hash assets, fill index.html and sw.js.
 import * as esbuild from "esbuild";
 import fs from "node:fs";
 import path from "node:path";
@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import { execSync } from "node:child_process";
 
 const root = path.resolve(new URL(".", import.meta.url).pathname, "..");
-const dist = path.join(root, "docs");
+const dist = path.join(root, "docs"); // output folder (GitHub Pages serves /docs)
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const watch = process.argv.includes("--watch");
 
@@ -54,4 +54,4 @@ const precache = ["./", "./index.html", "./manifest.webmanifest", `./assets/${js
 let sw = fs.readFileSync(path.join(root, "src/sw.js"), "utf8")
   .replace("__VERSION__", version).replace("__PRECACHE__", JSON.stringify(precache));
 fs.writeFileSync(path.join(dist, "sw.js"), sw);
-console.log(`built ${version} → dist/ (${(js.length / 1024).toFixed(0)} KB js)`);
+console.log(`built ${version} → docs/ (${(js.length / 1024).toFixed(0)} KB js)`);
